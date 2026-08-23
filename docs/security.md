@@ -60,6 +60,7 @@ flowchart TB
 | 只读 SQL | 单语句白名单 + query_only | 已索引数据的授权隔离 |
 | 安全删除 staging | 同目录随机 tombstone + 恢复校验 | 用户主动误删目标 |
 | 索引 artifacts 排除 | 防自索引循环与 DB 内容进入索引 | root 中其他 secrets |
+| 工程目录默认排除 | 减少 VCS/cache/build 内容进入索引 | 不是访问控制，不能保护其他敏感路径 |
 
 ## 6. 安全部署清单
 
@@ -112,4 +113,3 @@ CLI `rename` 和 `rm` 会真实修改文件，且 `rm --recursive` 最终调用�
 不要在公开 issue 中粘贴 secret、私有路径、数据库或源代码。按仓库根目录
 [`SECURITY.md`](../SECURITY.md) 私下联系维护者，并提供版本、OS、最小复现、攻击者位置（本机/远程）
 和预期影响。
-

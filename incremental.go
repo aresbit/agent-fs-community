@@ -33,6 +33,7 @@ func (s *Store) SyncPaths(ctx context.Context, root string, paths []string) (err
 	}
 	seen := make(map[string]struct{}, len(paths))
 	normalized := make([]string, 0, len(paths))
+	excluded := make([]string, 0)
 	for _, requestedPath := range paths {
 		path, pathErr := normalizePath(requestedPath)
 		if pathErr != nil {
@@ -45,6 +46,10 @@ func (s *Store) SyncPaths(ctx context.Context, root string, paths []string) (err
 			continue
 		}
 		seen[path] = struct{}{}
+		if s.isExcludedWithin(root, path) {
+			excluded = append(excluded, path)
+			continue
+		}
 		normalized = append(normalized, path)
 	}
 	type syncResult struct {
@@ -94,6 +99,9 @@ func (s *Store) SyncPaths(ctx context.Context, root string, paths []string) (err
 	close(results)
 	entriesByPath := make(map[string]scannedEntry, len(paths))
 	missingSet := make(map[string]struct{})
+	for _, path := range excluded {
+		missingSet[path] = struct{}{}
+	}
 	for result := range results {
 		if result.err != nil {
 			return result.err

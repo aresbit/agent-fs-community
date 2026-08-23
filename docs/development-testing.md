@@ -38,6 +38,7 @@ go test -race -count=10 ./...
 | `parser_test.go` | Go AST、DOCX、HTTP batch embedder |
 | `server_test.go` | 混合检索、Context Pack、MCP 协议、真实 watcher 增删 |
 | `operations_test.go` | rename/remove、危险路径、crash recovery |
+| `exclude_test.go` | 默认/自定义排除、关闭默认值、watch 剪枝、旧索引清理 |
 | `scripts/test-install.sh` | 隔离 HOME 下的一键安装与三客户端配置调用 |
 | `scripts/smoke-mcp.sh` | 运行中 daemon initialize 冒烟 |
 
@@ -54,6 +55,7 @@ go test -race -count=10 ./...
 - daemon 必须保持 loopback-only；社区版不新增“临时”远程开关。
 - MCP tools 默认只读；修改真实文件的能力留在显式 CLI/API。
 - Parser 和 embedder 必须尊重 context 取消与内容边界。
+- 扫描、增量同步和 watcher 必须共用 `exclude.go`，不能各自维护排除清单。
 - 新增错误应保留操作上下文并使用 `%w` 包装底层原因。
 
 ## 5. 修改 schema
@@ -108,4 +110,3 @@ bash scripts/test-install.sh
 
 新增 flag、环境变量、route、MCP tool、schema 表、parser 类型或安全边界时，必须更新 `docs/` 的相应
 章节与 `docs/README.md` 能力状态。目标指标和当前实测结果要分开，避免把 roadmap 写成发布事实。
-

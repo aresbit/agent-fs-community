@@ -31,6 +31,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	embeddingModel := global.String("embedding-model", os.Getenv("AGENTFS_EMBEDDING_MODEL"), "embedding model name")
 	embeddingDimensions := global.Int("embedding-dimensions", envInt("AGENTFS_EMBEDDING_DIMENSIONS"), "embedding vector dimensions")
 	embeddingKeyEnv := global.String("embedding-key-env", "AGENTFS_EMBEDDING_KEY", "environment variable containing embedding API key")
+	var excludePatterns stringList
+	global.Var(&excludePatterns, "exclude", "additional excluded basename glob (repeatable)")
+	noDefaultExcludes := global.Bool("no-default-excludes", false, "disable built-in VCS/cache/build directory exclusions")
 	global.Usage = func() { writeUsage(stderr) }
 	if err := global.Parse(args); err != nil {
 		return 2
@@ -56,10 +59,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		embedder = httpEmbedder
 	}
 	store, err := agentfs.Open(ctx, *dbPath, agentfs.Options{
-		ContentBytes: *contentBytes,
-		ExtractBytes: *extractBytes,
-		MaxRows:      *maxRows,
-		Embedder:     embedder,
+		ContentBytes:      *contentBytes,
+		ExtractBytes:      *extractBytes,
+		MaxRows:           *maxRows,
+		Embedder:          embedder,
+		ExcludePatterns:   excludePatterns,
+		NoDefaultExcludes: *noDefaultExcludes,
 	})
 	if err != nil {
 		writeError(stderr, err)
@@ -336,7 +341,15 @@ func writeUsage(writer io.Writer) {
 	_, _ = fmt.Fprint(writer, `agent-fs: query filesystem semantics through SQLite
 
 Usage:
-  agent-fs [--db PATH] [--content-bytes N] [--max-rows N] COMMAND [ARGS]
+  agent-fs [GLOBAL OPTIONS] COMMAND [ARGS]
+
+Global options:
+  --db PATH                    SQLite index path (or AGENTFS_DB)
+  --content-bytes N            maximum text preview bytes per file
+  --extract-bytes N            maximum extracted text bytes per file
+  --max-rows N                 maximum rows returned by one query
+  --exclude GLOB               additional excluded basename glob (repeatable)
+  --no-default-excludes        disable built-in VCS/cache/build exclusions
 
 Commands:
   init                         initialize the database

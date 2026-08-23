@@ -74,12 +74,13 @@ HTTP server 与初始扫描并行启动，因此 `/healthz` 表示服务进程�
 
 ### 4.2 增量更新
 
-1. fsnotify 产生 create/write/remove/rename/chmod 事件。
-2. watcher 将事件路径放入 `pending` map；新建目录还会被递归加入 watch 集合。
-3. ticker 等待路径超过 `debounce`，把成熟路径合并为一个批次。
-4. `SyncPaths` 对存在的路径重新描述、解析和向量化，对消失路径删除索引子树。
-5. SQLite 在一个事务中替换文件、Chunk、Embedding 和关联关系。
-6. 临时竞态失败会重新入队，等待下一次去抖周期重试。
+1. 扫描和 watcher 在目录入口应用同一排除策略，不进入 VCS、缓存、依赖和构建输出树。
+2. fsnotify 产生 create/write/remove/rename/chmod 事件。
+3. watcher 将事件路径放入 `pending` map；新建目录还会被递归加入 watch 集合。
+4. ticker 等待路径超过 `debounce`，把成熟路径合并为一个批次。
+5. `SyncPaths` 对存在的路径重新描述、解析和向量化，对消失/排除路径删除索引子树。
+6. SQLite 在一个事务中替换文件、Chunk、Embedding 和关联关系。
+7. 临时竞态失败会重新入队，等待下一次去抖周期重试。
 
 ### 4.3 检索请求
 
@@ -124,4 +125,4 @@ CLI 拒绝非 loopback `--listen`。server 会拒绝未列入 `--allow-origin` �
 | 默认 feature hash | 离线、无密钥、内容不出机 | 语义质量低于真实 Embedding 模型 |
 | 只对 Go 做 AST | 依赖少、准确保留 Go symbol | 其他语言目前只有窗口 Chunk |
 | loopback-only | 降低误暴露风险 | 不支持跨机器与共享服务 |
-
+| basename glob 剪枝 | 大幅减少生成树的扫描、索引和 watch 开销 | 同名业务目录需自定义或关闭默认规则 |

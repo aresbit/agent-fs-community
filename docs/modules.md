@@ -11,6 +11,7 @@ agent-fs-community/
 ├── scan.go                    # 完整扫描与事务提交
 ├── incremental.go             # watcher 事件的批量增量同步
 ├── watch.go                   # fsnotify 递归监听、去抖和重试
+├── exclude.go                 # 默认/自定义 basename glob 排除策略
 ├── parser.go                  # 文本、Go AST、PDF、Office 提取与 Chunk
 ├── embed.go                   # 本地 hash 和 HTTP Embedding
 ├── hybrid.go                  # 双层混合召回、过滤与融合排序
@@ -54,6 +55,9 @@ type Store struct {
 `Open` 负责路径规范化、创建 0700 父目录、打开 SQLite、设置单连接、应用 schema、恢复未完成操作，
 最后把数据库文件 chmod 为 0600。社区 schema 只接受版本 0/1，并主动拒绝权限感知版或旧 Python
 数据库，防止悄悄误读不同语义的数据。
+
+[`exclude.go`](../exclude.go) 在 `Open` 时合并并验证默认/自定义 basename globs。扫描、增量路径和
+watcher 注册都调用同一策略，避免“没有索引但仍占 watch”或“没有 watch 但完整扫描又写回”的分裂。
 
 扩展原则：新增索引行为优先成为 `Store` 方法；新增配置通过 `Options` 注入；不要从库层读取全局环境
 变量，环境变量解析应留在 CLI。
@@ -138,4 +142,3 @@ Chunk 的 symbol、范围和内容挂到文件级 `SearchHit` 上，因此一个
 运行时核心依赖只有 `fsnotify` 与 pure-Go `modernc.org/sqlite`。PDF 提取是可选外部命令。HTTP、MCP、
 AST、XML、ZIP 与 CLI 尽量使用 Go 标准库。新增依赖前应说明它替代了什么复杂度、是否引入 CGO、
 是否影响单 binary 部署和许可。
-

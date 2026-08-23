@@ -85,8 +85,9 @@ sudo sysctl fs.inotify.max_user_watches=1048576
 sudo sysctl fs.inotify.max_user_instances=1024
 ```
 
-永久设置应由机器管理员写入 `/etc/sysctl.d/`。提高限制会增加内核内存使用；先排除 `node_modules`、
-构建缓存或嵌套重复 roots 会更经济。当前版本没有 ignore glob 配置，因此超大生成目录应放在 root 外。
+永久设置应由机器管理员写入 `/etc/sysctl.d/`。提高限制会增加内核内存使用；默认规则已经剪枝
+`node_modules`、Bazel、语言缓存与常见构建输出。可用 `--exclude GLOB` 追加项目特有目录；同时应
+避免嵌套重复 roots。
 
 ### `address already in use`
 
@@ -155,4 +156,3 @@ systemctl --user start agent-fs.service
 3. 轮换索引中可能出现的 secret，而不只是 Embedding API key。
 4. 检查 shell、代理、SSH 和容器日志；社区版没有请求审计可用于完整追溯。
 5. 按 [`SECURITY.md`](../SECURITY.md) 向维护者私下报告产品漏洞。
-

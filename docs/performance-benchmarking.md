@@ -61,6 +61,9 @@
 至少保存 manifest：`path, kind, size, content_hash, mtime_ns, expected_terms`。生成器、seed 和 manifest
 checksum 必须与结果一起发布。
 
+结果必须同时报告原始目录数、默认/自定义排除规则、剪枝后的 watch 数与索引条目数。否则无法判断
+性能提升来自检索实现还是仅仅改变了输入集合。
+
 ## 4. inotify 与高频变更测试
 
 测试前记录：
@@ -153,4 +156,3 @@ Agent A/B: success, tokens, latency, calls（绝对值、减少率、CI）
 - 不只保留成功 run。
 - 不在不同模型/硬件/任务上比较相对下降。
 - 不把“本地 hash 向量存在”描述成已达到真实 Embedding 质量。
-

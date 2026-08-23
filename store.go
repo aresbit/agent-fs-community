@@ -25,14 +25,15 @@ var schemaSQL string
 // maxRows are positive. The abstraction function maps Store to a transactional
 // index whose rows describe filesystem paths and whose FTS rows share files.id.
 type Store struct {
-	mu           sync.RWMutex
-	db           *sql.DB
-	path         string
-	contentBytes int
-	extractBytes int
-	maxRows      int
-	embedder     Embedder
-	closed       bool
+	mu              sync.RWMutex
+	db              *sql.DB
+	path            string
+	contentBytes    int
+	extractBytes    int
+	maxRows         int
+	embedder        Embedder
+	excludePatterns []string
+	closed          bool
 }
 
 // Open creates or opens the index at path and applies all schema migrations.
@@ -61,6 +62,10 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	if opts.MaxRows == 0 {
 		opts.MaxRows = defaultMaxRows
 	}
+	excludePatterns, err := buildExcludePatterns(opts.ExcludePatterns, opts.NoDefaultExcludes)
+	if err != nil {
+		return nil, fmt.Errorf("open index: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create index directory: %w", err)
 	}
@@ -73,12 +78,13 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	db.SetMaxIdleConns(1)
 
 	store := &Store{
-		db:           db,
-		path:         path,
-		contentBytes: opts.ContentBytes,
-		extractBytes: opts.ExtractBytes,
-		maxRows:      opts.MaxRows,
-		embedder:     opts.Embedder,
+		db:              db,
+		path:            path,
+		contentBytes:    opts.ContentBytes,
+		extractBytes:    opts.ExtractBytes,
+		maxRows:         opts.MaxRows,
+		embedder:        opts.Embedder,
+		excludePatterns: excludePatterns,
 	}
 	if store.embedder == nil {
 		store.embedder = NewHashEmbedder(256)

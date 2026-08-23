@@ -52,6 +52,16 @@ bin/agent-fs --db "$HOME/.local/share/agent-fs/community.db" daemon \
 bin/agent-fs --content-bytes 16384 --extract-bytes 4194304 scan /absolute/project
 ```
 
+排除自定义生成目录：
+
+```bash
+bin/agent-fs --exclude 'generated-*' --exclude vendor scan /absolute/project
+bin/agent-fs --exclude 'generated-*' daemon --root /absolute/project
+```
+
+glob 只匹配任意层级的单个 basename，因此不能包含 `/`。默认会排除 VCS、缓存、Bazel/Node/Python
+依赖与常见构建输出；详见[目录排除配置](configuration-deployment.md#3-目录排除)。
+
 ## 4. 推荐的 Agent 使用方式
 
 在客户端项目规则或系统提示中加入：

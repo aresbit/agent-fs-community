@@ -66,7 +66,7 @@ func (s *Store) Watch(ctx context.Context, opts WatchOptions) error {
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename|fsnotify.Chmod) != 0 {
 				path := cleanEventPath(event.Name)
-				if isWithin(path, root) && !s.isIndexArtifact(path) {
+				if isWithin(path, root) && !s.isIndexArtifact(path) && !s.isExcludedWithin(root, path) {
 					pending[path] = time.Now()
 				}
 			}
@@ -135,6 +135,12 @@ func (s *Store) addWatchTree(watcher *fsnotify.Watcher, root string) error {
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if path != root && s.isExcludedName(entry.Name()) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if s.isIndexArtifact(path) {
 			if entry.IsDir() {

@@ -46,6 +46,10 @@ bin/agent-fs --db ~/.local/share/agent-fs/community.db daemon \
 daemon 启动时扫描每个 root，随后通过 fsnotify 增量同步。MCP endpoint：
 `http://127.0.0.1:7337/mcp`。
 
+扫描和 watcher 默认在目录入口剪枝 `.git`、`.cache`、`bazel-*`、`node_modules`、常见语言缓存与
+构建输出，避免工程生成树消耗大量 inotify watches。可在子命令前重复使用 `--exclude GLOB` 添加
+basename 规则；完整默认清单和覆盖方式见[配置文档](docs/configuration-deployment.md#3-目录排除)。
+
 ## Agent 工具
 
 - `context_pack`：首选工具。一次调用完成检索、排序、代码/文档 chunk 读取和 Token 预算裁剪。

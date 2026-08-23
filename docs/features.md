@@ -23,6 +23,10 @@
 100ms 去抖；成熟路径通过 `SyncPaths` 批量写入。目录删除会删除索引中的整个子树，新建目录会被
 递归加入 watch。同步失败的事件批次会重新排队。
 
+扫描与 watcher 共享 basename glob 排除策略，并在进入目录前剪枝，而不是先递归再丢弃结果。默认
+覆盖 VCS、Bazel、Node/Python 依赖缓存和常见构建输出；`--exclude` 可追加，
+`--no-default-excludes` 可完全关闭。完整扫描会事务性清理旧数据库中已变为排除项的子树。
+
 约束：Linux 上每个目录通常消耗一个 inotify watch，超大目录树需要提高内核限制。监听提供最终
 一致性，不承诺在所有硬件和负载下固定小于 1 秒。
 
@@ -110,4 +114,3 @@ CLI 提供 `query`、`ls`、`find`、`big`、`du`、`by-tag`。任意 SQL 只接
 
 `/healthz` 不是索引 freshness 或完整扫描完成信号。生产级可观测性（直方图、trace、审计）不在当前
 社区版内。
-

@@ -72,6 +72,12 @@ func (s *Store) collect(ctx context.Context, root string) ([]scannedEntry, error
 			}
 			return walkErr
 		}
+		if path != root && s.isExcludedName(dirEntry.Name()) {
+			if dirEntry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if s.isIndexArtifact(path) {
 			if dirEntry.IsDir() {
 				return filepath.SkipDir
