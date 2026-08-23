@@ -397,6 +397,12 @@ func (s *Store) writeIncrementalRelations(ctx context.Context, tx *sql.Tx,
 			return fmt.Errorf("insert changed chunk embedding batch: %w", err)
 		}
 	}
+	// 符号图：增量更新符号定义与调用引用
+	for _, entry := range entries {
+		if err := s.replaceSymbols(ctx, tx, ids[entry.path], entry.symbols, entry.refs); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

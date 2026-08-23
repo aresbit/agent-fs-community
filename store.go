@@ -32,6 +32,7 @@ type Store struct {
 	extractBytes    int
 	maxRows         int
 	embedder        Embedder
+	reranker        *CrossEncoder
 	excludePatterns []string
 	includeNames    map[string]struct{}
 	includePatterns []string
@@ -91,6 +92,7 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 		extractBytes:    opts.ExtractBytes,
 		maxRows:         opts.MaxRows,
 		embedder:        opts.Embedder,
+		reranker:        opts.Reranker,
 		excludePatterns: excludePatterns,
 		includeNames:    includeNames,
 		includePatterns: includePatterns,
@@ -177,6 +179,11 @@ func (s *Store) Close() error {
 	s.closed = true
 	if err := s.db.Close(); err != nil {
 		return fmt.Errorf("close index: %w", err)
+	}
+	if s.reranker != nil {
+		if err := s.reranker.Close(); err != nil {
+			return fmt.Errorf("close reranker: %w", err)
+		}
 	}
 	return nil
 }

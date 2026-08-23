@@ -74,6 +74,31 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_file_symbol ON chunks(file_id, symbol);
 
+-- 符号图：函数/符号定义与调用引用。让检索能回答「谁定义了这个符号」
+-- 以及「谁调用了这个函数」，而非只能命中文件。
+CREATE TABLE IF NOT EXISTS symbols (
+  id          INTEGER PRIMARY KEY,
+  file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  symbol      TEXT    NOT NULL,
+  kind        TEXT    NOT NULL DEFAULT 'function',
+  start_line  INTEGER NOT NULL DEFAULT 0,
+  end_line    INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(file_id, symbol, start_line)
+);
+
+CREATE INDEX IF NOT EXISTS idx_symbols_symbol ON symbols(symbol);
+
+CREATE TABLE IF NOT EXISTS symbol_refs (
+  id            INTEGER PRIMARY KEY,
+  file_id       INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  caller_symbol TEXT    NOT NULL DEFAULT '',
+  callee_symbol TEXT    NOT NULL,
+  line          INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_symbol_refs_callee ON symbol_refs(callee_symbol);
+CREATE INDEX IF NOT EXISTS idx_symbol_refs_caller ON symbol_refs(caller_symbol);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   symbol,
   language,

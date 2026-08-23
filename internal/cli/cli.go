@@ -31,6 +31,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	embeddingModel := global.String("embedding-model", os.Getenv("AGENTFS_EMBEDDING_MODEL"), "embedding model name")
 	embeddingDimensions := global.Int("embedding-dimensions", envInt("AGENTFS_EMBEDDING_DIMENSIONS"), "embedding vector dimensions")
 	embeddingKeyEnv := global.String("embedding-key-env", "AGENTFS_EMBEDDING_KEY", "environment variable containing embedding API key")
+	embeddingRuntime := global.String("embedding-runtime", os.Getenv("AGENTFS_EMBEDDING_RUNTIME"), "path to libonnxruntime.so for the local ONNX embedder")
+	rerankModel := global.String("rerank-model", os.Getenv("AGENTFS_RERANK_MODEL"), "path to a cross-encoder ONNX model for second-stage rerank")
 	var excludePatterns stringList
 	global.Var(&excludePatterns, "exclude", "additional excluded basename glob (repeatable)")
 	noDefaultExcludes := global.Bool("no-default-excludes", false, "disable built-in VCS/cache/build directory exclusions")
@@ -60,12 +62,33 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		embedder = httpEmbedder
+	} else if *embeddingRuntime != "off" {
+		// Default to a local all-MiniLM-L6-v2 ONNX embedder (384-dim real
+		// sentence embeddings). Fall back to the zero-dependency hashing
+		// embedder when the runtime or model is unavailable, so indexing never
+		// hard-fails on an unprovisioned machine.
+		onnxEmbedder, embedErr := agentfs.NewONNXEmbedder(*embeddingRuntime)
+		if embedErr != nil {
+			_, _ = fmt.Fprintf(stderr, "agent-fs: local ONNX embedder unavailable, using hash fallback: %v\n", embedErr)
+		} else {
+			embedder = onnxEmbedder
+		}
+	}
+	var reranker *agentfs.CrossEncoder
+	if strings.TrimSpace(*rerankModel) != "" {
+		crossEncoder, rerankErr := agentfs.NewCrossEncoder(*rerankModel, *embeddingRuntime)
+		if rerankErr != nil {
+			_, _ = fmt.Fprintf(stderr, "agent-fs: cross-encoder unavailable, rerank disabled: %v\n", rerankErr)
+		} else {
+			reranker = crossEncoder
+		}
 	}
 	store, err := agentfs.Open(ctx, *dbPath, agentfs.Options{
 		ContentBytes:      *contentBytes,
 		ExtractBytes:      *extractBytes,
 		MaxRows:           *maxRows,
 		Embedder:          embedder,
+		Reranker:          reranker,
 		ExcludePatterns:   excludePatterns,
 		NoDefaultExcludes: *noDefaultExcludes,
 		IncludePatterns:   includePatterns,
@@ -357,6 +380,12 @@ Global options:
   --no-default-excludes        disable built-in VCS/cache/build exclusions
   --include-file GLOB          additional included file basename glob (repeatable)
   --all-files                  index every file type instead of the source/Markdown allowlist
+  --embedding-url URL          OpenAI-compatible embedding base URL
+  --embedding-model NAME       embedding model name (with --embedding-url)
+  --embedding-dimensions N     embedding vector dimensions (with --embedding-url)
+  --embedding-runtime PATH     libonnxruntime.so path for local ONNX embedder,
+                               or "off" to use the hashing fallback
+  --rerank-model PATH          cross-encoder ONNX model for second-stage rerank
 
 Commands:
   init                         initialize the database

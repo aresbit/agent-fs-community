@@ -26,6 +26,8 @@ type scannedEntry struct {
 	mime        string
 	vector      []float32
 	chunks      []parsedChunk
+	symbols     []symbolDef
+	refs        []symbolRef
 }
 
 // Scan replaces the indexed view of root in one SQLite transaction.
@@ -150,6 +152,9 @@ func (s *Store) describePath(ctx context.Context, path string, info fs.FileInfo)
 		entry.contentHash = document.hash
 		entry.mime = document.mime
 		entry.chunks = document.chunks
+		if extension := strings.ToLower(filepath.Ext(path)); tsLanguageForExtension(extension) != nil {
+			entry.symbols, entry.refs = treeSitterSymbols(document.text, extension)
+		}
 	default:
 		entry.kind = "other"
 	}
@@ -271,6 +276,9 @@ func (s *Store) commitScan(ctx context.Context, root string, entries []scannedEn
 		if err := s.replaceChunks(ctx, tx, id, entry.chunks, indexedAt); err != nil {
 			return fmt.Errorf("replace chunks for %s: %w", entry.path, err)
 		}
+		if err := s.replaceSymbols(ctx, tx, id, entry.symbols, entry.refs); err != nil {
+			return fmt.Errorf("replace symbols for %s: %w", entry.path, err)
+		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO agentfs_seen(path) VALUES (?)", entry.path); err != nil {
 			return fmt.Errorf("mark %s seen: %w", entry.path, err)
 		}
@@ -339,6 +347,31 @@ func (s *Store) replaceChunks(ctx context.Context, tx *sql.Tx, fileID int64, chu
 		) VALUES (?, ?, ?, ?, ?, ?, ?)`, chunkID, s.embedder.Model(), len(chunk.vector),
 			vectorBucket(chunk.vector), encodeVector(chunk.vector), chunk.hash, indexedAt); err != nil {
 			return fmt.Errorf("insert chunk embedding %d: %w", chunk.ordinal, err)
+		}
+	}
+	return nil
+}
+
+// replaceSymbols 重写一个文件的符号定义与调用引用（符号图）。
+func (s *Store) replaceSymbols(ctx context.Context, tx *sql.Tx, fileID int64, symbols []symbolDef, refs []symbolRef) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM symbols WHERE file_id=?", fileID); err != nil {
+		return fmt.Errorf("delete symbols: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM symbol_refs WHERE file_id=?", fileID); err != nil {
+		return fmt.Errorf("delete references: %w", err)
+	}
+	for _, sym := range symbols {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO symbols(file_id, symbol, kind, start_line, end_line) VALUES (?,?,?,?,?)",
+			fileID, sym.symbol, sym.kind, sym.startLine, sym.endLine); err != nil {
+			return fmt.Errorf("insert symbol %s: %w", sym.symbol, err)
+		}
+	}
+	for _, ref := range refs {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO symbol_refs(file_id, caller_symbol, callee_symbol, line) VALUES (?,?,?,?)",
+			fileID, ref.caller, ref.callee, ref.line); err != nil {
+			return fmt.Errorf("insert reference %s: %w", ref.callee, err)
 		}
 	}
 	return nil

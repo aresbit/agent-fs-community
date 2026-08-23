@@ -35,6 +35,7 @@ type SearchHit struct {
 	BM25Score     float64 `json:"bm25_score,omitempty"`
 	VectorScore   float64 `json:"vector_score,omitempty"`
 	MetadataScore float64 `json:"metadata_score,omitempty"`
+	RerankScore   float64 `json:"rerank_score,omitempty"`
 }
 
 type hybridCandidate struct {
@@ -120,10 +121,68 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 		}
 		return strings.Compare(left.Path, right.Path)
 	})
+	if err := s.rerank(ctx, request, hits); err != nil {
+		// Rerank is a best-effort refinement: on any error we keep the fused
+		// first-stage ranking rather than failing the whole search.
+		_, _ = fmt.Fprintf(os.Stderr, "agent-fs: rerank skipped: %v\n", err)
+	}
 	if len(hits) > request.Limit {
 		hits = hits[:request.Limit]
 	}
 	return hits, nil
+}
+
+// rerank re-scores the top candidates with the cross-encoder and folds the
+// result into Score. The cross-encoder is applied only to the first-stage top-K
+// (2×limit, at least 10), so its per-pair cost stays bounded even on large indexes.
+// The cross-encoder logit becomes the final ranking signal; the fused first-stage
+// score remains available on BM25Score/VectorScore/MetadataScore for diagnostics.
+func (s *Store) rerank(ctx context.Context, request HybridRequest, hits []SearchHit) error {
+	if s.reranker == nil || request.Query == "" || len(hits) == 0 {
+		return nil
+	}
+	rerankCount := min(len(hits), max(request.Limit*2, 10))
+	docs := make([]string, rerankCount)
+	for index := 0; index < rerankCount; index++ {
+		docs[index] = rerankDocument(hits[index])
+	}
+	scores, err := s.reranker.Score(ctx, request.Query, docs)
+	if err != nil {
+		return err
+	}
+	if len(scores) != rerankCount {
+		return fmt.Errorf("cross-encoder returned %d scores for %d documents", len(scores), rerankCount)
+	}
+	for index := 0; index < rerankCount; index++ {
+		rerank := sigmoid(float64(scores[index]))
+		hits[index].RerankScore = rerank
+		// Cross-encoder is the final authority for ranking; sigmoid keeps Score
+		// in (0,1) and preserves the logit ordering (sigmoid is monotonic).
+		hits[index].Score = rerank
+	}
+	slices.SortFunc(hits, func(left, right SearchHit) int {
+		if left.Score != right.Score {
+			if left.Score > right.Score {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(left.Path, right.Path)
+	})
+	return nil
+}
+
+// rerankDocument 取用于 cross-encoder 的文档文本：优先 chunk 级内容（含符号名），
+// 否则用文件级 snippet。截断到合理长度，避免过长序列稀释 cross-encoder 的注意力。
+func rerankDocument(hit SearchHit) string {
+	text := hit.Snippet
+	if text == "" {
+		text = hit.Path
+	}
+	if hit.ChunkSymbol != "" {
+		text = hit.ChunkSymbol + "\n" + text
+	}
+	return compactSnippet(text, 1800)
 }
 
 func (s *Store) loadChunkLexicalCandidates(ctx context.Context, match string, limit int, candidates map[int64]*hybridCandidate) error {
@@ -237,13 +296,18 @@ func (s *Store) loadChunkLexicalCandidates(ctx context.Context, match string, li
 }
 
 func (s *Store) loadChunkVectorCandidates(ctx context.Context, query []float32, limit int, candidates map[int64]*hybridCandidate) error {
+	where, args, recallLimit, err := s.vectorRecall(ctx, "chunk_embeddings", s.embedder.Model(), vectorBucket(query), limit)
+	if err != nil {
+		return err
+	}
+	args = append(args, recallLimit, recallLimit)
 	rows, err := s.db.QueryContext(ctx, `WITH ev AS MATERIALIZED (
 		SELECT chunk_id, vector, dimensions FROM chunk_embeddings
-		WHERE model=? AND bucket=? LIMIT ?
+		WHERE `+where+` LIMIT ?
 	) SELECT f.id, f.path, f.kind, f.size, f.mtime_ns, f.mime,
 		f.tags_text, c.symbol, c.start_line, c.end_line, c.content, ev.vector, ev.dimensions
 		FROM ev JOIN chunks c ON c.id=ev.chunk_id JOIN files f ON f.id=c.file_id
-		LIMIT ?`, s.embedder.Model(), vectorBucket(query), limit, limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return fmt.Errorf("load chunk vector candidates: %w", err)
 	}
@@ -405,14 +469,38 @@ func compactSnippet(text string, limit int) string {
 	return text[:limit] + "…"
 }
 
+// vectorScanAllThreshold 是向量召回全量扫描的规模阈值。sign-LSH 桶过滤能把大索引的
+// 候选查表降为亚线性，但 query 与文件 embedding 的前 8 维符号一旦不匹配，语义相关文件
+// 会被整桶漏掉——小索引下这个漏召回尤其致命（可能一个都召回不到）。低于该阈值时改全量
+// 扫描，几十万以内的 384 维向量做精确余弦，成本毫秒级，召回完整。
+const vectorScanAllThreshold = 20_000
+
+// vectorRecall 返回向量召回的 WHERE 片段、参数与内/外层 LIMIT。小索引全量扫描
+// （不带 bucket 过滤，LIMIT 用总行数），大索引走桶过滤（LIMIT 用调用方 limit）。
+func (s *Store) vectorRecall(ctx context.Context, table, model string, bucket int64, limit int) (where string, args []any, recallLimit int, err error) {
+	var count int
+	if err = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE model=?", model).Scan(&count); err != nil {
+		return "", nil, 0, fmt.Errorf("count vector rows: %w", err)
+	}
+	if count <= vectorScanAllThreshold {
+		return "model=?", []any{model}, max(count, 1), nil
+	}
+	return "model=? AND bucket=?", []any{model, bucket}, limit, nil
+}
+
 func (s *Store) loadVectorCandidates(ctx context.Context, query []float32, limit int, candidates map[int64]*hybridCandidate) error {
+	where, args, recallLimit, err := s.vectorRecall(ctx, "embeddings", s.embedder.Model(), vectorBucket(query), limit)
+	if err != nil {
+		return err
+	}
+	args = append(args, recallLimit, recallLimit)
 	rows, err := s.db.QueryContext(ctx, `WITH ev AS MATERIALIZED (
 		SELECT file_id, vector, dimensions FROM embeddings
-		WHERE model=? AND bucket=? LIMIT ?
+		WHERE `+where+` LIMIT ?
 	) SELECT f.id, f.path, f.kind, f.size, f.mtime_ns,
 		f.mime, f.tags_text, ev.vector, ev.dimensions
 		FROM ev JOIN files f ON f.id=ev.file_id
-		LIMIT ?`, s.embedder.Model(), vectorBucket(query), limit, limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return fmt.Errorf("load vector candidates: %w", err)
 	}
@@ -486,16 +574,39 @@ func (s *Store) loadMetadataCandidates(ctx context.Context, request HybridReques
 	return rows.Err()
 }
 
+// englishStopwords 是 FTS 查询里忽略的高频虚词。它们会命中文档里同样无意义的虚词
+// （如 query 里的 "the" 匹配注释里的 "the"），产生虚假的 BM25 分数。BM25 权重 0.52
+// 高于向量 0.38，一个虚词命中就能把纯语义的向量匹配淹没在噪声里，所以查询侧直接丢弃。
+var englishStopwords = map[string]bool{
+	"a": true, "an": true, "the": true, "and": true, "or": true, "but": true,
+	"of": true, "to": true, "in": true, "on": true, "at": true, "for": true,
+	"with": true, "by": true, "is": true, "are": true, "was": true, "were": true,
+	"be": true, "been": true, "being": true, "do": true, "does": true, "did": true,
+	"have": true, "has": true, "had": true, "it": true, "its": true, "this": true,
+	"that": true, "these": true, "those": true, "as": true, "from": true, "not": true,
+	"no": true, "we": true, "you": true, "they": true, "he": true, "she": true,
+	"i": true, "my": true, "your": true, "our": true, "their": true, "will": true,
+	"would": true, "can": true, "could": true, "should": true, "what": true,
+	"which": true, "who": true, "how": true, "when": true, "where": true, "why": true,
+	"all": true, "some": true, "any": true, "into": true, "over": true, "under": true,
+	"about": true, "between": true, "through": true, "out": true, "off": true,
+	"up": true, "down": true, "then": true, "than": true, "so": true, "very": true,
+	"just": true, "here": true, "there": true, "now": true, "too": true,
+}
+
 func ftsMatch(query string) string {
 	words := strings.FieldsFunc(query, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' && r != '-'
 	})
-	if len(words) == 0 {
-		return `""`
-	}
 	quoted := make([]string, 0, len(words))
 	for _, word := range words {
+		if englishStopwords[strings.ToLower(word)] {
+			continue
+		}
 		quoted = append(quoted, `"`+strings.ReplaceAll(word, `"`, `""`)+`"`)
+	}
+	if len(quoted) == 0 {
+		return `""`
 	}
 	return strings.Join(quoted, " OR ")
 }

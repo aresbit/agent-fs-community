@@ -66,6 +66,8 @@ func extractDocument(ctx context.Context, path string, limit int) (parsedDocumen
 	}
 	if extension == ".go" {
 		document.chunks = goASTChunks(path, text)
+	} else if tsLanguageForExtension(extension) != nil {
+		document.chunks = treeSitterChunks(text, extension)
 	}
 	if len(document.chunks) == 0 {
 		document.chunks = windowChunks(text, language, "")

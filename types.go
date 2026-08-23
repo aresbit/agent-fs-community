@@ -28,6 +28,7 @@ type Options struct {
 	ExtractBytes      int
 	MaxRows           int
 	Embedder          Embedder
+	Reranker          *CrossEncoder
 	ExcludePatterns   []string
 	NoDefaultExcludes bool
 	IncludePatterns   []string
