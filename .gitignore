@@ -1,0 +1,9 @@
+/bin/
+/.agent-fs/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+.coverage
+coverage.out
+.DS_Store
