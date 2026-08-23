@@ -98,6 +98,16 @@ make check
 
 `make check` 执行 gofmt 检查、vet、build 和全包 race test。
 
+## 完整文档
+
+完整设计与使用文档从 [`docs/README.md`](docs/README.md) 开始，包括：
+
+- [总体架构设计](docs/architecture.md)与[特性设计](docs/features.md)；
+- [代码模块设计](docs/modules.md)与[数据模型/崩溃恢复](docs/data-model-recovery.md)；
+- [快速开始](docs/user-guide.md)、[MCP/HTTP API](docs/mcp-http-api.md)和[配置部署](docs/configuration-deployment.md)；
+- [运维排障](docs/operations-troubleshooting.md)、[开发测试](docs/development-testing.md)、
+  [性能基准方法](docs/performance-benchmarking.md)与[安全模型](docs/security.md)。
+
 ## 社区版边界
 
 本仓库有意不包含：多租户、文件权限策略、审计日志、远程暴露、集中控制台和企业 SLA。
