@@ -84,6 +84,9 @@ func (s *Store) collect(ctx context.Context, root string) ([]scannedEntry, error
 			}
 			return nil
 		}
+		if !dirEntry.IsDir() && !s.isIncludedFileName(dirEntry.Name()) {
+			return nil
+		}
 		info, err := dirEntry.Info()
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {

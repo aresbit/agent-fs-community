@@ -12,8 +12,8 @@ func TestSyncPathsBatchesFileAndDirectoryRemoval(t *testing.T) {
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	nested := filepath.Join(directory, "nested.txt")
-	standalone := filepath.Join(root, "removed-file.txt")
+	nested := filepath.Join(directory, "nested.md")
+	standalone := filepath.Join(root, "removed-file.md")
 	mustWrite(t, nested, "nested")
 	mustWrite(t, standalone, "standalone")
 	if _, err := store.Scan(t.Context(), root, ScanOptions{}); err != nil {

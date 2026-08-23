@@ -77,7 +77,8 @@ Chunk 按 `(file_id, ordinal)` 唯一，保存语言、symbol、范围、内容 
 完整扫描在进入事务前完成所有文件读取、解析和 Embedding。提交阶段负责：
 
 目录遍历会先按共享排除策略剪枝；这些路径不会进入采集集合，也会在事务的 stale reconciliation 中
-从旧索引移除。
+从旧索引移除。非目录文件还必须通过源码/Markdown/配置 allowlist；默认拒绝的媒体、压缩包和二进制
+同样不会进入 `files/chunks/embeddings`，完整扫描会清理旧版本遗留行。
 
 1. upsert `files`；
 2. 建立 parent 关系；

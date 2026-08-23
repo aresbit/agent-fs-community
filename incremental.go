@@ -74,6 +74,10 @@ func (s *Store) SyncPaths(ctx context.Context, root string, paths []string) (err
 					results <- syncResult{path: path, err: fmt.Errorf("stat changed path %s: %w", path, statErr)}
 					continue
 				}
+				if !info.IsDir() && !s.isIncludedFileName(filepath.Base(path)) {
+					results <- syncResult{path: path, missing: true}
+					continue
+				}
 				var found []scannedEntry
 				var collectErr error
 				if info.IsDir() {

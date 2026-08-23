@@ -39,6 +39,7 @@ go test -race -count=10 ./...
 | `server_test.go` | 混合检索、Context Pack、MCP 协议、真实 watcher 增删 |
 | `operations_test.go` | rename/remove、危险路径、crash recovery |
 | `exclude_test.go` | 默认/自定义排除、关闭默认值、watch 剪枝、旧索引清理 |
+| `include_test.go` | 源码/配置保留、媒体/压缩包过滤、自定义 include、watch 事件过滤 |
 | `scripts/test-install.sh` | 隔离 HOME 下的一键安装与三客户端配置调用 |
 | `scripts/smoke-mcp.sh` | 运行中 daemon initialize 冒烟 |
 
@@ -56,6 +57,7 @@ go test -race -count=10 ./...
 - MCP tools 默认只读；修改真实文件的能力留在显式 CLI/API。
 - Parser 和 embedder 必须尊重 context 取消与内容边界。
 - 扫描、增量同步和 watcher 必须共用 `exclude.go`，不能各自维护排除清单。
+- 新增语言扩展或特殊工程文件应更新 `include.go` 与正反例测试；不要为新媒体格式扩充黑名单。
 - 新增错误应保留操作上下文并使用 `%w` 包装底层原因。
 
 ## 5. 修改 schema

@@ -37,10 +37,11 @@ watcher 的可恢复同步错误以 `agent-fs watcher:` 开头；致命 server�
 4. 直接执行一次 `agent-fs scan /absolute/root`，观察具体 parser/read 错误。
 5. 确认 MCP 客户端连接的是同一端口和数据库对应 daemon。
 
-### PDF 导致初始扫描失败
+### 显式启用的 PDF 导致初始扫描失败
 
-典型错误是 `pdftotext is required`。安装 Poppler 后重启，或把 PDF 移出当前 root。当前实现遇到单个
-不可解析 PDF 会让完整扫描失败，不会静默跳过。
+PDF 默认不进入索引。使用 `--include-file '*.pdf'` 或 `--all-files` 后，典型错误是
+`pdftotext is required`。安装 Poppler 后重启，或移除该 include。显式启用后，单个不可解析 PDF 会让
+完整扫描失败，不会静默跳过。
 
 ```bash
 command -v pdftotext

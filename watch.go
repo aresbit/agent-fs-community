@@ -66,7 +66,8 @@ func (s *Store) Watch(ctx context.Context, opts WatchOptions) error {
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename|fsnotify.Chmod) != 0 {
 				path := cleanEventPath(event.Name)
-				if isWithin(path, root) && !s.isIndexArtifact(path) && !s.isExcludedWithin(root, path) {
+				if isWithin(path, root) && !s.isIndexArtifact(path) && !s.isExcludedWithin(root, path) &&
+					s.shouldQueueWatchEvent(path, event.Op) {
 					pending[path] = time.Now()
 				}
 			}
@@ -119,6 +120,14 @@ func (s *Store) Watch(ctx context.Context, opts WatchOptions) error {
 			}
 		}
 	}
+}
+
+func (s *Store) shouldQueueWatchEvent(path string, operation fsnotify.Op) bool {
+	if s.isIncludedFileName(filepath.Base(path)) || operation&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		return true
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.IsDir()
 }
 
 func signalWatchReady(destination chan<- struct{}) {

@@ -46,9 +46,13 @@ bin/agent-fs --db ~/.local/share/agent-fs/community.db daemon \
 daemon 启动时扫描每个 root，随后通过 fsnotify 增量同步。MCP endpoint：
 `http://127.0.0.1:7337/mcp`。
 
-扫描和 watcher 默认在目录入口剪枝 `.git`、`.cache`、`bazel-*`、`node_modules`、常见语言缓存与
-构建输出，避免工程生成树消耗大量 inotify watches。可在子命令前重复使用 `--exclude GLOB` 添加
+扫描和 watcher 默认在目录入口剪枝 `.git`、`.cache`、`bazel-*`、`node_modules`、OCaml/Rust、
+Python/uv、npm/JS 等常见依赖缓存与构建输出，避免工程生成树消耗大量 inotify watches。可在子命令前重复使用 `--exclude GLOB` 添加
 basename 规则；完整默认清单和覆盖方式见[配置文档](docs/configuration-deployment.md#3-目录排除)。
+
+文件采用白名单：默认只进入源码、Markdown、IaC/构建配置和依赖锁文件；PNG/JPEG、音视频、ZIP/TAR、
+PDF/Office、数据库和模型文件均不入库。特殊文本格式可用 `--include-file GLOB` 加入，只有明确需要旧版
+全文件行为时才使用 `--all-files`。
 
 ## Agent 工具
 
@@ -76,8 +80,8 @@ basename 规则；完整默认清单和覆盖方式见[配置文档](docs/config
 
 - Go：标准库 AST declaration chunk，保留 symbol 与行号；
 - 其他代码/文本：有重叠的有界窗口 chunk；
-- PDF：通过 Poppler `pdftotext` 抽取；
-- DOCX/PPTX/XLSX：通过 zip+xml 有界解析；
+- PDF：解析器可通过 Poppler `pdftotext` 抽取，默认白名单不索引，需显式 `--include-file '*.pdf'`；
+- DOCX/PPTX/XLSX：解析器支持 zip+xml 有界解析，默认不索引，需显式加入；
 - embedding：默认离线 feature hash，也可连接 OpenAI-compatible `/v1/embeddings`。
 
 真实 embedding 示例：

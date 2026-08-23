@@ -30,10 +30,11 @@ loopback 网络上的单用户上下文服务：它把本地文件系统转换�
 | 完整扫描 | 已实现 | 先收集、解析和向量化，再以单个 SQLite 事务提交 |
 | 文件监听与增量索引 | 已实现 | fsnotify、事件去抖、批量更新、失败重试 |
 | 工程目录剪枝 | 已实现 | 扫描与 watcher 共用默认 basename globs，并支持 CLI 扩展/关闭 |
+| 源码文件白名单 | 已实现 | 默认仅代码、Markdown、文本配置/锁文件；媒体、压缩包和二进制不入库 |
 | BM25 + 向量 + 元数据混合检索 | 已实现 | 文件与 Chunk 两级召回，固定权重融合 |
 | MCP/HTTP 服务 | 已实现 | loopback HTTP、两个 MCP tools、两个 REST API |
 | Go AST Chunk | 已实现 | declaration/symbol/行号级 Chunk |
-| PDF/Office | 已实现 | PDF 依赖 `pdftotext`；DOCX/PPTX/XLSX 原生 ZIP/XML 提取 |
+| PDF/Office parser | 已实现、默认不启用 | 用 `--include-file` 显式加入；PDF 依赖 `pdftotext` |
 | 崩溃恢复操作日志 | 已实现 | `rename`、`remove` 持久状态机与启动恢复 |
 | Claude Code/Codex/OpenCC | 已提供配置并有兼容记录 | 见 [兼容性记录](../COMPATIBILITY.md) |
 | 认证、ACL、租户、审计 | 不包含 | 社区版仅面向受信任的本机单用户 |

@@ -17,6 +17,13 @@ func TestScanPrunesDefaultEngineeringDirectories(t *testing.T) {
 		".cache/tool/result",
 		"bazel-project/bin/output",
 		"node_modules/package/index.js",
+		".npm/_cacache/content",
+		".parcel-cache/bundle/data",
+		".venv/lib/python/site-packages/module.py",
+		".nox/test/lib/module.py",
+		"package.egg-info/PKG-INFO",
+		"_build/default/module.cmx",
+		"_opam/lib/package/META",
 		"target/debug/binary",
 	}
 	for _, relative := range excluded {
@@ -27,19 +34,34 @@ func TestScanPrunesDefaultEngineeringDirectories(t *testing.T) {
 	source := filepath.Join(root, "src", "main.go")
 	mustMkdir(t, filepath.Dir(source))
 	mustWrite(t, source, "package main\nfunc main() {}")
+	preserved := []string{
+		"dune-project", "Cargo.toml", "Cargo.lock", "pyproject.toml", "uv.lock",
+		"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+	}
+	for _, name := range preserved {
+		mustWrite(t, filepath.Join(root, name), "authoritative project configuration")
+	}
+	cargoConfig := filepath.Join(root, ".cargo", "config.toml")
+	mustMkdir(t, filepath.Dir(cargoConfig))
+	mustWrite(t, cargoConfig, "[build]")
 
 	result, err := store.Scan(t.Context(), root, ScanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Entries != 3 {
-		t.Fatalf("Scan().Entries = %d, want root, src, and main.go", result.Entries)
-	}
 	paths, err := store.Query(t.Context(), "SELECT path FROM files ORDER BY path")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := firstColumnStrings(t, paths), []string{root, filepath.Dir(source), source}; !slices.Equal(got, want) {
+	want := []string{root, filepath.Dir(source), source, filepath.Dir(cargoConfig), cargoConfig}
+	for _, name := range preserved {
+		want = append(want, filepath.Join(root, name))
+	}
+	slices.Sort(want)
+	if result.Entries != len(want) {
+		t.Fatalf("Scan().Entries = %d, want %d", result.Entries, len(want))
+	}
+	if got := firstColumnStrings(t, paths); !slices.Equal(got, want) {
 		t.Fatalf("indexed paths = %#v, want %#v", got, want)
 	}
 }
@@ -61,7 +83,7 @@ func TestCustomExcludeAndNoDefaultExcludes(t *testing.T) {
 		t.Fatalf("custom-excluded path count = %v, want 0", result.Rows[0][0])
 	}
 
-	allStore, allRoot := newTestStore(t, Options{NoDefaultExcludes: true})
+	allStore, allRoot := newTestStore(t, Options{NoDefaultExcludes: true, AllFiles: true})
 	gitHead := filepath.Join(allRoot, ".git", "HEAD")
 	mustMkdir(t, filepath.Dir(gitHead))
 	mustWrite(t, gitHead, "ref: refs/heads/main")

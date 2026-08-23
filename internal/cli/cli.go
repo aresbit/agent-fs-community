@@ -34,6 +34,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var excludePatterns stringList
 	global.Var(&excludePatterns, "exclude", "additional excluded basename glob (repeatable)")
 	noDefaultExcludes := global.Bool("no-default-excludes", false, "disable built-in VCS/cache/build directory exclusions")
+	var includePatterns stringList
+	global.Var(&includePatterns, "include-file", "additional included file basename glob (repeatable)")
+	allFiles := global.Bool("all-files", false, "index every file type instead of the source/Markdown allowlist")
 	global.Usage = func() { writeUsage(stderr) }
 	if err := global.Parse(args); err != nil {
 		return 2
@@ -65,6 +68,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		Embedder:          embedder,
 		ExcludePatterns:   excludePatterns,
 		NoDefaultExcludes: *noDefaultExcludes,
+		IncludePatterns:   includePatterns,
+		AllFiles:          *allFiles,
 	})
 	if err != nil {
 		writeError(stderr, err)
@@ -350,6 +355,8 @@ Global options:
   --max-rows N                 maximum rows returned by one query
   --exclude GLOB               additional excluded basename glob (repeatable)
   --no-default-excludes        disable built-in VCS/cache/build exclusions
+  --include-file GLOB          additional included file basename glob (repeatable)
+  --all-files                  index every file type instead of the source/Markdown allowlist
 
 Commands:
   init                         initialize the database

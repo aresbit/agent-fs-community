@@ -33,6 +33,9 @@ type Store struct {
 	maxRows         int
 	embedder        Embedder
 	excludePatterns []string
+	includeNames    map[string]struct{}
+	includePatterns []string
+	allFiles        bool
 	closed          bool
 }
 
@@ -66,6 +69,10 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open index: %w", err)
 	}
+	includeNames, includePatterns, err := buildIncludePatterns(opts.IncludePatterns)
+	if err != nil {
+		return nil, fmt.Errorf("open index: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create index directory: %w", err)
 	}
@@ -85,6 +92,9 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 		maxRows:         opts.MaxRows,
 		embedder:        opts.Embedder,
 		excludePatterns: excludePatterns,
+		includeNames:    includeNames,
+		includePatterns: includePatterns,
+		allFiles:        opts.AllFiles,
 	}
 	if store.embedder == nil {
 		store.embedder = NewHashEmbedder(256)

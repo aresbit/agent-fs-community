@@ -24,8 +24,12 @@
 递归加入 watch。同步失败的事件批次会重新排队。
 
 扫描与 watcher 共享 basename glob 排除策略，并在进入目录前剪枝，而不是先递归再丢弃结果。默认
-覆盖 VCS、Bazel、Node/Python 依赖缓存和常见构建输出；`--exclude` 可追加，
+覆盖 VCS/Bazel、OCaml、Rust、Python/uv、Node/npm 依赖缓存和常见构建输出；`--exclude` 可追加，
 `--no-default-excludes` 可完全关闭。完整扫描会事务性清理旧数据库中已变为排除项的子树。
+
+文件使用 allowlist 而非不断增长的媒体黑名单：源码、Markdown、IaC/构建配置和锁文件默认进入；
+图片、音视频、压缩包、PDF/Office、数据库、模型和普通 `.txt` 默认不进入。`--include-file` 可追加
+basename glob，`--all-files` 恢复全文件模式。watcher 会过滤非白名单文件的 create/write 事件。
 
 约束：Linux 上每个目录通常消耗一个 inotify watch，超大目录树需要提高内核限制。监听提供最终
 一致性，不承诺在所有硬件和负载下固定小于 1 秒。
@@ -74,11 +78,11 @@ Token 估算采用约 4 UTF-8 bytes/token，不是具体模型 tokenizer 的精�
 |---|---|---|
 | Go | 标准库 parser 生成 declaration Chunk，保留函数、方法、type/var/const/import symbol 与行号 | 语法解析失败时回退窗口 Chunk |
 | Python/JS/TS/Rust/C/C++/Java/Kotlin/Swift/Markdown/SQL/Shell | UTF-8 文本提取后生成 1,200 rune 窗口、200 rune 重叠 | 没有语言 AST |
-| PDF | `pdftotext -layout -nopgbrk` 提取 | 必须安装 Poppler；30 秒超时 |
-| DOCX | 读取正文、页眉和页脚 XML | 不还原复杂排版、批注或图片 OCR |
-| PPTX | 按 slide XML 提取文本 | 不解析图片、讲者备注和视觉布局 |
-| XLSX | shared strings 与 worksheet XML | 返回单元格文本，不重建公式语义和表结构 |
-| 二进制/非 UTF-8 | 只保留文件元数据，不索引正文 | MIME 仍由内容探测生成 |
+| PDF | `pdftotext -layout -nopgbrk` 提取 | 默认不索引；显式 include 后必须安装 Poppler；30 秒超时 |
+| DOCX | 读取正文、页眉和页脚 XML | 默认不索引；不还原复杂排版、批注或图片 OCR |
+| PPTX | 按 slide XML 提取文本 | 默认不索引；不解析图片、讲者备注和视觉布局 |
+| XLSX | shared strings 与 worksheet XML | 默认不索引；不重建公式语义和表结构 |
+| 二进制/非 UTF-8 | 默认完全不进入索引 | `--all-files` 时可保留元数据，但正文为空 |
 
 Office 解析会限制单个 XML entry 的膨胀比例和总提取字节数，降低压缩包异常膨胀风险。
 

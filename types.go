@@ -20,8 +20,9 @@ var (
 )
 
 // Options controls index content and query result bounds.
-// A zero Options uses an 8 KiB text preview, returns at most 1000 rows, and
-// prunes common VCS, cache, dependency, and build-output directories.
+// A zero Options uses an 8 KiB text preview, returns at most 1000 rows, prunes
+// common VCS/cache/dependency/build directories, and indexes only source,
+// Markdown, infrastructure, and text project-configuration files.
 type Options struct {
 	ContentBytes      int
 	ExtractBytes      int
@@ -29,6 +30,8 @@ type Options struct {
 	Embedder          Embedder
 	ExcludePatterns   []string
 	NoDefaultExcludes bool
+	IncludePatterns   []string
+	AllFiles          bool
 }
 
 // ScanOptions controls one complete, transactional root scan.

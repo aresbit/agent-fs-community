@@ -12,7 +12,7 @@ func TestRenameAndRemoveSubtree(t *testing.T) {
 	store, root := newTestStore(t, Options{})
 	directory := filepath.Join(root, "old")
 	mustMkdir(t, directory)
-	child := filepath.Join(directory, "child.txt")
+	child := filepath.Join(directory, "child.md")
 	mustWrite(t, child, "child data")
 	if _, err := store.Scan(t.Context(), root, ScanOptions{}); err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestRenameAndRemoveSubtree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rename() error = %v", err)
 	}
-	newChild := filepath.Join(renamed, "child.txt")
+	newChild := filepath.Join(renamed, "child.md")
 	if _, err := os.Stat(newChild); err != nil {
 		t.Fatalf("renamed child stat: %v", err)
 	}
@@ -114,8 +114,8 @@ func TestOpenRecoversInterruptedRename(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "tree")
 	mustMkdir(t, root)
-	oldPath := filepath.Join(root, "old.txt")
-	newPath := filepath.Join(root, "new.txt")
+	oldPath := filepath.Join(root, "old.md")
+	newPath := filepath.Join(root, "new.md")
 	mustWrite(t, oldPath, "durable rename")
 	database := filepath.Join(base, "index", "fs.db")
 	store, err := Open(t.Context(), database, Options{})
@@ -162,7 +162,7 @@ func TestOpenRecoversInterruptedRemove(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "tree")
 	mustMkdir(t, root)
-	path := filepath.Join(root, "delete.txt")
+	path := filepath.Join(root, "delete.md")
 	mustWrite(t, path, "durable remove")
 	database := filepath.Join(base, "index", "fs.db")
 	store, err := Open(t.Context(), database, Options{})

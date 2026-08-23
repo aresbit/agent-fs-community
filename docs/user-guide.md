@@ -5,7 +5,7 @@
 - Linux 开发机；一键安装要求 systemd user service。
 - Go 1.26 或更高版本。
 - `curl` 用于安装后的健康检查。
-- 索引 PDF 时额外安装 Poppler 的 `pdftotext`；不索引 PDF 可不安装。
+- 显式使用 `--include-file '*.pdf'` 或 `--all-files` 索引 PDF 时，额外安装 Poppler `pdftotext`。
 - Claude Code、Codex、OpenCC 都是可选客户端，不影响 daemon 自身运行。
 
 ## 2. 一键安装
@@ -61,6 +61,21 @@ bin/agent-fs --exclude 'generated-*' daemon --root /absolute/project
 
 glob 只匹配任意层级的单个 basename，因此不能包含 `/`。默认会排除 VCS、缓存、Bazel/Node/Python
 依赖与常见构建输出；详见[目录排除配置](configuration-deployment.md#3-目录排除)。
+
+默认文件范围只包括源码、Markdown 和工程文本配置。图片、视频、音频、压缩包、PDF/Office、数据库、
+模型和普通 `.txt` 会被跳过。如项目有特殊文本格式：
+
+```bash
+bin/agent-fs --include-file '*.templ' --include-file 'API_NOTES.txt' scan /absolute/project
+```
+
+需要显式恢复所有文件时：
+
+```bash
+bin/agent-fs --all-files scan /absolute/project
+```
+
+`--all-files` 仍会遵守目录排除规则。完整清单见[文件白名单](configuration-deployment.md#4-文件白名单)。
 
 ## 4. 推荐的 Agent 使用方式
 

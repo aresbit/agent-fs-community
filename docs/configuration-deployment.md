@@ -16,6 +16,8 @@
 | `--embedding-key-env NAME` | `AGENTFS_EMBEDDING_KEY` | 指定存放 API key 的环境变量名 |
 | `--exclude GLOB` | 可重复 | 在默认集合外追加 basename glob |
 | `--no-default-excludes` | false | 完全关闭内置工程目录排除 |
+| `--include-file GLOB` | 可重复 | 在源码/Markdown白名单外加入 basename glob |
+| `--all-files` | false | 接受所有文件类型；仍遵守目录排除 |
 
 `--embedding-url` 非空时，model 和正 dimensions 也必须存在。URL 可以给 base URL 或完整
 `/v1/embeddings`；代码会自动补全后者。
@@ -42,16 +44,25 @@ agent-fs [全局参数] daemon --root ROOT [--root ROOT...] [daemon 参数]
 ```text
 .git .hg .svn .repo .jj
 .cache .ccache .sccache .bazel-cache bazel-* buck-out
-node_modules .yarn .pnpm-store
-__pycache__ .mypy_cache .pytest_cache .ruff_cache .tox .venv venv
-.gradle .next .nuxt .pants.d .turbo .nx
-build dist out target coverage htmlcov
+node_modules bower_components jspm_packages .npm .npm-cache .pnpm-store
+.parcel-cache .webpack-cache .vite .next .nuxt .svelte-kit .angular
+.docusaurus .turbo .nx .nyc_output storybook-static
+__pycache__ .mypy_cache .pytest_cache .ruff_cache .pytype .pyre
+.tox .nox .hypothesis .venv venv .uv-cache .eggs *.egg-info
+pip-wheel-metadata .ipynb_checkpoints
+_build _opam .opam-switch target
+.gradle .pants.d build dist out coverage htmlcov
 DerivedData Pods
 ```
 
-`bazel-*` 同时排除常见的 `bazel-bin`、`bazel-out`、`bazel-testlogs` 和 `bazel-WORKSPACE`。规则只
+`bazel-*` 同时排除常见的 `bazel-bin`、`bazel-out`、`bazel-testlogs` 和 `bazel-WORKSPACE`；
+`*.egg-info` 匹配 Python 包构建元数据。规则只
 匹配单个 basename，不允许 `/` 或 `\\`，Linux 下区分大小写。显式配置的 root 本身始终允许，即使
 它的 basename 与默认规则相同；排除从 root 的子项开始。
+
+默认值不会排除语言和包管理器的权威配置/锁文件，包括 `dune-project`、`dune`、`opam` 文件、
+`Cargo.toml`、`Cargo.lock`、`.cargo/config.toml`、`pyproject.toml`、`uv.lock`、`package.json`、
+`package-lock.json`、`pnpm-lock.yaml` 与 `yarn.lock`。
 
 追加项目规则时，全局 flag 必须写在 COMMAND 前：
 
@@ -69,7 +80,40 @@ agent-fs --no-default-excludes --exclude .git --exclude .cache daemon --root /ab
 变更排除配置后应执行完整 `scan ROOT` 或重启 daemon；初始扫描会把数据库中旧的排除子树作为 stale
 数据删除。排除是索引/性能策略，不是访问控制，daemon 进程仍以当前 OS 用户身份运行。
 
-## 4. 本地默认 Embedding
+## 4. 文件白名单
+
+默认策略只索引以下文本上下文：
+
+- 常用源码：Go、Python、JS/TS、Rust、C/C++、Java/Kotlin、Swift、OCaml、Shell、SQL 等；
+- Markdown/MDX 和 Web 源码；
+- IaC、构建和文本配置：YAML、TOML、JSON、XML、Terraform、CMake、Bazel 等；
+- 无扩展名的权威工程文件：Dockerfile、Makefile、Cargo.lock、uv.lock、各类 JS lockfile、Dune 等。
+
+默认不索引 `.txt`、PNG/JPEG/GIF/SVG 等图片、MP3/MP4 等音视频、ZIP/TAR/GZ 等压缩包、PDF、
+DOCX/PPTX/XLSX、SQLite/其他数据库、二进制、字体、模型和 source map。使用 allowlist 意味着未来出现的
+未知二进制格式也会自动排除。
+
+加入项目自定义文本格式：
+
+```bash
+agent-fs --include-file '*.templ' --include-file 'API_NOTES.txt' daemon --root /absolute/project
+```
+
+glob 只匹配单个 basename。`--all-files` 恢复旧的全文件采集行为，但目录排除仍优先：
+
+```bash
+agent-fs --all-files --exclude downloads daemon --root /absolute/project
+```
+
+PDF/Office parser 仍保留，但默认不会被调用。按需启用：
+
+```bash
+agent-fs --include-file '*.pdf' --include-file '*.docx' scan /absolute/docs
+```
+
+启用 PDF 需要 `pdftotext`。变更 include 策略后完整扫描或重启 daemon，会清理旧索引里不再允许的文件。
+
+## 5. 本地默认 Embedding
 
 不设置任何 embedding 参数时使用 256 维 feature hash：
 
@@ -79,7 +123,7 @@ agent-fs --db /absolute/index.db daemon --root /absolute/project
 
 这是隐私和部署最简单的模式。它能利用 token 相似性，但不等同于训练过的语义模型。
 
-## 5. OpenAI-compatible Embedding
+## 6. OpenAI-compatible Embedding
 
 ```bash
 export AGENTFS_EMBEDDING_URL=http://127.0.0.1:8000
@@ -109,7 +153,7 @@ systemctl --user restart agent-fs.service
 
 注意：systemd 不会继承你当前 shell 临时 export 的变量。
 
-## 6. 一键安装器配置
+## 7. 一键安装器配置
 
 ```bash
 AGENTFS_LISTEN=127.0.0.1:7444 \
@@ -131,7 +175,7 @@ XDG_DATA_HOME="$HOME/.local/share" \
 
 安装器目前把一个位置参数写成一个 `--root`，也不会自动把 embedding 参数写进 unit。
 
-## 7. 多 root systemd 配置
+## 8. 多 root systemd 配置
 
 编辑 `~/.config/systemd/user/agent-fs.service`：
 
@@ -149,7 +193,7 @@ systemctl --user restart agent-fs.service
 journalctl --user -u agent-fs.service -n 100 --no-pager
 ```
 
-## 8. 容器与远程部署
+## 9. 容器与远程部署
 
 社区版不建议容器发布端口或远程部署。即使进程只绑定容器内 `127.0.0.1`，sidecar、host network、
 代理或 SSH tunnel 也可能改变可达边界。社区版没有认证/授权来补偿这种暴露。
@@ -161,7 +205,7 @@ journalctl --user -u agent-fs.service -n 100 --no-pager
 - 数据库和 workspace volume 只对该用户开放；
 - MCP 客户端连接容器内 loopback。
 
-## 9. 数据库路径与权限
+## 10. 数据库路径与权限
 
 `Open` 会创建 0700 的数据库父目录并把数据库文件设为 0600。SQLite WAL/SHM 是运行时 artifacts；
 备份时应先停止 daemon，或使用 SQLite 一致性备份工具。不要把数据库放在被索引 root 内，虽然代码

@@ -14,7 +14,7 @@ func TestScanQueryTagAndReconcile(t *testing.T) {
 	store, root := newTestStore(t, Options{})
 	docs := filepath.Join(root, "docs")
 	mustMkdir(t, docs)
-	readme := filepath.Join(docs, "readme.txt")
+	readme := filepath.Join(docs, "readme.md")
 	mustWrite(t, readme, "hello agent database")
 	blob := filepath.Join(root, "blob.bin")
 	mustWriteBytes(t, blob, []byte{0, 1, 2, 3})
@@ -23,8 +23,8 @@ func TestScanQueryTagAndReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
-	if result.Entries != 4 {
-		t.Fatalf("Scan().Entries = %d, want 4", result.Entries)
+	if result.Entries != 3 {
+		t.Fatalf("Scan().Entries = %d, want 3 (binary file excluded)", result.Entries)
 	}
 
 	search, err := store.Search(t.Context(), "agent database")
@@ -56,17 +56,17 @@ func TestScanQueryTagAndReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiskUsage() error = %v", err)
 	}
-	if got := usage.Rows[0][0]; got != int64(4) {
-		t.Fatalf("DiskUsage entries = %v, want 4", got)
+	if got := usage.Rows[0][0]; got != int64(3) {
+		t.Fatalf("DiskUsage entries = %v, want 3", got)
 	}
-	if got := usage.Rows[0][1]; got != int64(len("hello agent database")+4) {
+	if got := usage.Rows[0][1]; got != int64(len("hello agent database")) {
 		t.Fatalf("DiskUsage bytes = %v", got)
 	}
 
 	if err := os.Remove(blob); err != nil {
 		t.Fatal(err)
 	}
-	fresh := filepath.Join(root, "fresh.txt")
+	fresh := filepath.Join(root, "fresh.md")
 	mustWrite(t, fresh, "new")
 	if _, err := store.Scan(t.Context(), root, ScanOptions{}); err != nil {
 		t.Fatalf("second Scan() error = %v", err)
@@ -94,8 +94,8 @@ func TestScanQueryTagAndReconcile(t *testing.T) {
 
 func TestReadOnlyQueryAndBound(t *testing.T) {
 	store, root := newTestStore(t, Options{MaxRows: 1})
-	mustWrite(t, filepath.Join(root, "a.txt"), "a")
-	mustWrite(t, filepath.Join(root, "b.txt"), "b")
+	mustWrite(t, filepath.Join(root, "a.md"), "a")
+	mustWrite(t, filepath.Join(root, "b.md"), "b")
 	if _, err := store.Scan(t.Context(), root, ScanOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestReadOnlyQueryAndBound(t *testing.T) {
 
 func TestCancelledScanPreservesPreviousSnapshot(t *testing.T) {
 	store, root := newTestStore(t, Options{})
-	file := filepath.Join(root, "value.txt")
+	file := filepath.Join(root, "value.md")
 	mustWrite(t, file, "before")
 	if _, err := store.Scan(t.Context(), root, ScanOptions{}); err != nil {
 		t.Fatal(err)
@@ -162,7 +162,7 @@ func TestOuterScanReconcilesStaleNestedRootRows(t *testing.T) {
 	store, root := newTestStore(t, Options{})
 	nested := filepath.Join(root, "nested")
 	mustMkdir(t, nested)
-	file := filepath.Join(nested, "gone.txt")
+	file := filepath.Join(nested, "gone.md")
 	mustWrite(t, file, "gone")
 	if _, err := store.Scan(t.Context(), root, ScanOptions{}); err != nil {
 		t.Fatal(err)
@@ -187,7 +187,7 @@ func TestOuterScanReconcilesStaleNestedRootRows(t *testing.T) {
 
 func TestConcurrentReadQueries(t *testing.T) {
 	store, root := newTestStore(t, Options{})
-	mustWrite(t, filepath.Join(root, "file.txt"), "concurrent")
+	mustWrite(t, filepath.Join(root, "file.md"), "concurrent")
 	if _, err := store.Scan(t.Context(), root, ScanOptions{}); err != nil {
 		t.Fatal(err)
 	}

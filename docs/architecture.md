@@ -74,7 +74,8 @@ HTTP server 与初始扫描并行启动，因此 `/healthz` 表示服务进程�
 
 ### 4.2 增量更新
 
-1. 扫描和 watcher 在目录入口应用同一排除策略，不进入 VCS、缓存、依赖和构建输出树。
+1. 扫描和 watcher 在目录入口应用同一排除策略，不进入 VCS、缓存、依赖和构建输出树；非目录条目
+   还需通过源码/Markdown/配置文件白名单。
 2. fsnotify 产生 create/write/remove/rename/chmod 事件。
 3. watcher 将事件路径放入 `pending` map；新建目录还会被递归加入 watch 集合。
 4. ticker 等待路径超过 `debounce`，把成熟路径合并为一个批次。
@@ -126,3 +127,4 @@ CLI 拒绝非 loopback `--listen`。server 会拒绝未列入 `--allow-origin` �
 | 只对 Go 做 AST | 依赖少、准确保留 Go symbol | 其他语言目前只有窗口 Chunk |
 | loopback-only | 降低误暴露风险 | 不支持跨机器与共享服务 |
 | basename glob 剪枝 | 大幅减少生成树的扫描、索引和 watch 开销 | 同名业务目录需自定义或关闭默认规则 |
+| 文件类型白名单 | 图片、视频、压缩包等不会进入解析/Embedding/索引 | 特殊文本和 PDF/Office 需要显式加入 |

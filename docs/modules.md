@@ -12,6 +12,7 @@ agent-fs-community/
 ├── incremental.go             # watcher 事件的批量增量同步
 ├── watch.go                   # fsnotify 递归监听、去抖和重试
 ├── exclude.go                 # 默认/自定义 basename glob 排除策略
+├── include.go                 # 源码/Markdown 文件白名单与 opt-in 规则
 ├── parser.go                  # 文本、Go AST、PDF、Office 提取与 Chunk
 ├── embed.go                   # 本地 hash 和 HTTP Embedding
 ├── hybrid.go                  # 双层混合召回、过滤与融合排序
@@ -58,6 +59,8 @@ type Store struct {
 
 [`exclude.go`](../exclude.go) 在 `Open` 时合并并验证默认/自定义 basename globs。扫描、增量路径和
 watcher 注册都调用同一策略，避免“没有索引但仍占 watch”或“没有 watch 但完整扫描又写回”的分裂。
+[`include.go`](../include.go) 则负责非目录条目的 allowlist：常用扩展名使用 O(1) map 查询，特殊无扩展名
+文件使用 exact-name map，只有少量 glob 走 `filepath.Match`，避免百万文件树上逐项线性匹配大清单。
 
 扩展原则：新增索引行为优先成为 `Store` 方法；新增配置通过 `Options` 注入；不要从库层读取全局环境
 变量，环境变量解析应留在 CLI。

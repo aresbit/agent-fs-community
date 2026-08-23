@@ -143,7 +143,7 @@ func TestWatcherIncrementallyCreatesAndDeletes(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("watcher not ready")
 	}
-	path := filepath.Join(root, "fresh.txt")
+	path := filepath.Join(root, "fresh.md")
 	if err := os.WriteFile(path, []byte("fresh watcher context"), 0o644); err != nil {
 		t.Fatal(err)
 	}

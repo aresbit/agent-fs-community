@@ -13,12 +13,22 @@ import (
 // watches in a local source-context index. Patterns use filepath.Match and are
 // intentionally matched against one path component, not an absolute path.
 var defaultExcludePatterns = []string{
+	// Version-control metadata.
 	".git", ".hg", ".svn", ".repo", ".jj",
+	// General compiler and build-system caches.
 	".cache", ".ccache", ".sccache", ".bazel-cache", "bazel-*", "buck-out",
-	"node_modules", ".yarn", ".pnpm-store",
-	"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".venv", "venv",
-	".gradle", ".next", ".nuxt", ".pants.d", ".turbo", ".nx",
-	"build", "dist", "out", "target", "coverage", "htmlcov",
+	// JavaScript and package-manager dependencies/caches and generated sites.
+	"node_modules", "bower_components", "jspm_packages", ".npm", ".npm-cache", ".pnpm-store",
+	".parcel-cache", ".webpack-cache", ".vite", ".next", ".nuxt", ".svelte-kit", ".angular",
+	".docusaurus", ".turbo", ".nx", ".nyc_output", "storybook-static",
+	// Python and uv environments, bytecode, test/type-check caches, and package outputs.
+	"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".pytype", ".pyre",
+	".tox", ".nox", ".hypothesis", ".venv", "venv", ".uv-cache", ".eggs", "*.egg-info",
+	"pip-wheel-metadata", ".ipynb_checkpoints",
+	// OCaml/Dune local switches and build output; Rust output is under target.
+	"_build", "_opam", ".opam-switch", "target",
+	// Other common language/build outputs.
+	".gradle", ".pants.d", "build", "dist", "out", "coverage", "htmlcov",
 	"DerivedData", "Pods",
 }
 
