@@ -2,6 +2,7 @@ package agentfs
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -257,9 +259,13 @@ func decodeVector(raw []byte, dimensions int) ([]float32, bool) {
 	return vector, true
 }
 
+// vectorBucketBits 是 sign-LSH 用到的维度数：取 embedding 前 N 维的符号拼成一个
+// N 位整数，共 2^N 个桶。改这个值需要重建 embeddings/chunk_embeddings 的 bucket 列。
+const vectorBucketBits = 8
+
 func vectorBucket(vector []float32) int64 {
 	var bucket uint16
-	for index := 0; index < min(8, len(vector)); index++ {
+	for index := range min(vectorBucketBits, len(vector)) {
 		if vector[index] >= 0 {
 			bucket |= 1 << index
 		}
@@ -267,13 +273,54 @@ func vectorBucket(vector []float32) int64 {
 	return int64(bucket)
 }
 
-func cosine(left, right []float32) float64 {
-	if len(left) != len(right) {
+// vectorProbes 返回一次向量召回该扫描的桶：精确桶，加上把每一个「符号不可靠」的
+// 维度各翻转一次得到的邻桶（汉明距离 ≤ 1）。
+//
+// 只查精确桶是这套 LSH 最大的漏召回来源。query 与文档 embedding 只要在前 8 维里
+// 有任意一维符号不同，整桶文档就彻底看不见——而 sign-LSH 的分桶边界是超平面，
+// 分量绝对值越接近 0 的维度，说明这个点离超平面越近，符号越是「差一点就翻过去」，
+// 恰恰最不该被当成硬边界。语义上高度相关的一对向量，在某个近零维上符号相反是
+// 完全正常的。
+//
+// 后置条件：返回 1+min(vectorBucketBits,len) 个互不相同的桶；邻桶按 |分量| 升序，
+// 即最值得探查的排在最前面。
+func vectorProbes(vector []float32) []int64 {
+	exact := vectorBucket(vector)
+	width := min(vectorBucketBits, len(vector))
+	dimensions := make([]int, width)
+	for index := range width {
+		dimensions[index] = index
+	}
+	slices.SortFunc(dimensions, func(left, right int) int {
+		return cmp.Compare(math.Abs(float64(vector[left])), math.Abs(float64(vector[right])))
+	})
+	probes := make([]int64, 0, width+1)
+	probes = append(probes, exact)
+	for _, dimension := range dimensions {
+		probes = append(probes, exact^(1<<dimension))
+	}
+	return probes
+}
+
+// cosineSimilarity 返回两个向量的余弦相似度，值域 [-1,1]。
+//
+// 不要假设 embedding 已经 L2 归一化就退化成点积：HashEmbedder 归一化，本地 ONNX
+// 模型是否归一化取决于导出的计算图，而 HTTPEmbedder 对接的是任意 OpenAI 兼容服务，
+// 归一化与否完全由对方决定。未归一化时点积会随向量模长放大——长文本分数虚高，
+// 还会超出 [0,1]，把融合权重（向量一路只该占 0.38）冲垮。
+func cosineSimilarity(left, right []float32) float64 {
+	if len(left) != len(right) || len(left) == 0 {
 		return 0
 	}
-	var dot float64
+	var dot, leftNorm, rightNorm float64
 	for index := range left {
-		dot += float64(left[index] * right[index])
+		leftValue, rightValue := float64(left[index]), float64(right[index])
+		dot += leftValue * rightValue
+		leftNorm += leftValue * leftValue
+		rightNorm += rightValue * rightValue
 	}
-	return dot
+	if leftNorm == 0 || rightNorm == 0 {
+		return 0
+	}
+	return dot / math.Sqrt(leftNorm*rightNorm)
 }

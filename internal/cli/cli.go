@@ -74,7 +74,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			embedder = onnxEmbedder
 		}
 	}
-	var reranker *agentfs.CrossEncoder
+	var reranker agentfs.Reranker
 	if strings.TrimSpace(*rerankModel) != "" {
 		crossEncoder, rerankErr := agentfs.NewCrossEncoder(*rerankModel, *embeddingRuntime)
 		if rerankErr != nil {

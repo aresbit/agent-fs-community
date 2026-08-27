@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ type Store struct {
 	extractBytes    int
 	maxRows         int
 	embedder        Embedder
-	reranker        *CrossEncoder
+	reranker        Reranker
 	excludePatterns []string
 	includeNames    map[string]struct{}
 	includePatterns []string
@@ -169,7 +170,9 @@ func (s *Store) initialize(ctx context.Context) error {
 	return nil
 }
 
-// Close releases the index. It is safe to call more than once.
+// Close releases the index and every model the Store owns. It is safe to call
+// more than once, and safe to pair with a caller that also defers Close on the
+// embedder it passed in (both Close paths are idempotent).
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -177,15 +180,26 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
+	var errs []error
 	if err := s.db.Close(); err != nil {
-		return fmt.Errorf("close index: %w", err)
+		errs = append(errs, fmt.Errorf("close index: %w", err))
 	}
-	if s.reranker != nil {
-		if err := s.reranker.Close(); err != nil {
-			return fmt.Errorf("close reranker: %w", err)
+	// 顺序有意义：reranker 与 ONNX embedder 共用同一个进程级 ONNX 环境，而
+	// embedder 的 Close 会 DestroyEnvironment。先释放 reranker 的 session，否则它
+	// 会在一个已经销毁的环境上释放句柄。
+	if closer, ok := s.reranker.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close reranker: %w", err))
 		}
 	}
-	return nil
+	// Store 是 embedder 的最后持有者，否则本地 ONNX 模型（session + 约 90MB 权重）
+	// 会一直泄漏到进程退出。
+	if closer, ok := s.embedder.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close embedder: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Path returns the absolute index path.

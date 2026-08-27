@@ -72,11 +72,16 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 		if err != nil {
 			return nil, fmt.Errorf("embed search query: %w", err)
 		}
-		if err := s.loadLexicalCandidates(ctx, ftsMatch(request.Query), candidateLimit, candidates); err != nil {
-			return nil, err
-		}
-		if err := s.loadChunkLexicalCandidates(ctx, ftsMatch(request.Query), candidateLimit, candidates); err != nil {
-			return nil, err
+		// 空 match 表示 query 里没有任何可检索的词（全是停用词或全是标点）。
+		// 这一路必须整体跳过：把空短语交给 FTS5 是语法错误，会让整次搜索失败，
+		// 而向量一路本来就还能独立回答这种纯语义 query。
+		if match := ftsMatch(request.Query); match != "" {
+			if err := s.loadLexicalCandidates(ctx, match, candidateLimit, candidates); err != nil {
+				return nil, err
+			}
+			if err := s.loadChunkLexicalCandidates(ctx, match, candidateLimit, candidates); err != nil {
+				return nil, err
+			}
 		}
 		if err := s.loadVectorCandidates(ctx, queryVector, candidateLimit*4, candidates); err != nil {
 			return nil, err
@@ -90,17 +95,14 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 	}
 
 	now := time.Now()
-	hits := make([]SearchHit, 0, len(candidates))
+	surviving := make([]*hybridCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		if !matchesMetadata(candidate.hit, candidate.tagsText, request) {
 			continue
 		}
-		if candidate.lexRank > 0 {
-			candidate.hit.BM25Score = 1 / float64(candidate.lexRank)
-		}
 		if len(candidate.vectorRaw) > 0 && len(queryVector) > 0 {
 			if vector, ok := decodeVector(candidate.vectorRaw, candidate.dims); ok {
-				candidate.hit.VectorScore = max(0, cosine(queryVector, vector))
+				candidate.hit.VectorScore = max(0, cosineSimilarity(queryVector, vector))
 			}
 		}
 		if request.Query != "" && candidate.lexRank == 0 && candidate.hit.VectorScore <= 0 {
@@ -108,19 +110,18 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 		}
 		age := now.Sub(time.Unix(0, candidate.hit.MTimeNS))
 		candidate.hit.MetadataScore = 1 / (1 + math.Max(0, age.Hours()/24)/365)
+		surviving = append(surviving, candidate)
+	}
+	assignVectorRanks(surviving)
+	hits := make([]SearchHit, 0, len(surviving))
+	for _, candidate := range surviving {
+		candidate.hit.BM25Score = reciprocalRank(candidate.lexRank)
 		candidate.hit.Score = 0.52*candidate.hit.BM25Score +
-			0.38*candidate.hit.VectorScore + 0.10*candidate.hit.MetadataScore
+			0.38*reciprocalRank(candidate.vecRank) +
+			0.10*candidate.hit.MetadataScore
 		hits = append(hits, candidate.hit)
 	}
-	slices.SortFunc(hits, func(left, right SearchHit) int {
-		if left.Score != right.Score {
-			if left.Score > right.Score {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(left.Path, right.Path)
-	})
+	slices.SortFunc(hits, byDescendingScore)
 	if err := s.rerank(ctx, request, hits); err != nil {
 		// Rerank is a best-effort refinement: on any error we keep the fused
 		// first-stage ranking rather than failing the whole search.
@@ -132,18 +133,70 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 	return hits, nil
 }
 
-// rerank re-scores the top candidates with the cross-encoder and folds the
-// result into Score. The cross-encoder is applied only to the first-stage top-K
-// (2×limit, at least 10), so its per-pair cost stays bounded even on large indexes.
-// The cross-encoder logit becomes the final ranking signal; the fused first-stage
-// score remains available on BM25Score/VectorScore/MetadataScore for diagnostics.
+// rrfK 是 reciprocal-rank fusion 的平滑常数。一路召回排名 rank 的贡献是
+// (k+1)/(k+rank)，归一到 (0,1]，第一名恰好 1.0。k 决定相邻名次的落差：k=0 时
+// 第一名的贡献是第二名的两倍，词法一路的头名会直接压死任何语义命中，向量一路
+// 形同虚设；文献惯用 k=60，让两路的名次都真正参与决策。
+const rrfK = 60
+
+// reciprocalRank 把 1 起算的名次换算成融合贡献。rank<=0 表示该路召回没有命中
+// 这个候选，贡献 0——缺席与「排在最后」必须区分开。
+func reciprocalRank(rank int) float64 {
+	if rank <= 0 {
+		return 0
+	}
+	return float64(rrfK+1) / float64(rrfK+rank)
+}
+
+// assignVectorRanks 按余弦相似度给候选排名，使向量一路与词法一路在融合时用同一
+// 种尺度（名次），而不是拿一个原始相似度去和一个倒数名次相加。
+//
+// 前置条件：每个候选的 hit.VectorScore 已算好。
+// 后置条件：有正相似度的候选按相似度降序拿到 1..n 的 vecRank；其余保持 0。
+func assignVectorRanks(candidates []*hybridCandidate) {
+	ranked := make([]*hybridCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.hit.VectorScore > 0 {
+			ranked = append(ranked, candidate)
+		}
+	}
+	slices.SortFunc(ranked, func(left, right *hybridCandidate) int {
+		if left.hit.VectorScore != right.hit.VectorScore {
+			if left.hit.VectorScore > right.hit.VectorScore {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(left.hit.Path, right.hit.Path)
+	})
+	for index, candidate := range ranked {
+		candidate.vecRank = index + 1
+	}
+}
+
+func byDescendingScore(left, right SearchHit) int {
+	if left.Score != right.Score {
+		if left.Score > right.Score {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(left.Path, right.Path)
+}
+
+// rerank re-scores the first-stage top-K with the cross-encoder. K is 2×limit
+// (at least 10), so the per-pair cost stays bounded even on large indexes.
+//
+// Modifies: the first K elements of hits, in place.
+// Postcondition: hits[:K] is ordered by cross-encoder score; hits[K:] keeps its
+// first-stage order and stays strictly behind hits[:K].
 func (s *Store) rerank(ctx context.Context, request HybridRequest, hits []SearchHit) error {
 	if s.reranker == nil || request.Query == "" || len(hits) == 0 {
 		return nil
 	}
-	rerankCount := min(len(hits), max(request.Limit*2, 10))
+	rerankCount := min(len(hits), max(request.Limit*2, 10), maxRerankCandidates)
 	docs := make([]string, rerankCount)
-	for index := 0; index < rerankCount; index++ {
+	for index := range rerankCount {
 		docs[index] = rerankDocument(hits[index])
 	}
 	scores, err := s.reranker.Score(ctx, request.Query, docs)
@@ -153,27 +206,44 @@ func (s *Store) rerank(ctx context.Context, request HybridRequest, hits []Search
 	if len(scores) != rerankCount {
 		return fmt.Errorf("cross-encoder returned %d scores for %d documents", len(scores), rerankCount)
 	}
-	for index := 0; index < rerankCount; index++ {
+	for index := range rerankCount {
 		rerank := sigmoid(float64(scores[index]))
 		hits[index].RerankScore = rerank
-		// Cross-encoder is the final authority for ranking; sigmoid keeps Score
-		// in (0,1) and preserves the logit ordering (sigmoid is monotonic).
+		// Cross-encoder is the final authority within the reranked window;
+		// sigmoid keeps Score in (0,1) and preserves the logit ordering.
 		hits[index].Score = rerank
 	}
-	slices.SortFunc(hits, func(left, right SearchHit) int {
-		if left.Score != right.Score {
-			if left.Score > right.Score {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(left.Path, right.Path)
-	})
+	// 只在被重排的窗口内部重排序。窗口之外的候选仍带着第一阶段的融合分，那是与
+	// sigmoid 完全不可比的另一套尺度——一起排序时，一个 cross-encoder 从没看过的
+	// 尾部候选会凭融合分反超真正被重排的头部，甚至挤进最终结果。级联检索的契约是
+	// 第二阶段只重排第一阶段的 top-K，不改变 K 内外的相对次序。
+	slices.SortFunc(hits[:rerankCount], byDescendingScore)
 	return nil
 }
 
+// rerankDocumentBytes 是送进 cross-encoder 的文档字节上限。
+//
+// 这个值要和 tokenizer.json 的 truncation.max_length（512）对齐才有意义：代码大约
+// 3~4 字节一个 token，1800 字节 ≈ 450~600 token，恰好把一个 windowChunks 产出的
+// chunk（1200 rune）完整喂进去，又不会大幅超过模型截断点而白做分词。
+// 改这个常数之前先改 tokenizer.json——真正的硬上限在那里。
+const rerankDocumentBytes = 1800
+
+// maxRerankCandidates 是二阶段重排的窗口上限。
+//
+// 窗口原本只有 2×limit 一个约束，而 limit 最大 200，于是最坏情况要跑 400 个
+// (query, doc) 对。把 cross-encoder 的序列从 128 放宽到 512 之后，这个乘积必须
+// 收口，否则一次搜索的推理量会失控。
+//
+// 成本对照（以 token 位置计，batch×seq）：
+//   旧：400 对 × 128 = 51200，但文档只有 ~100 token 进得了模型
+//   新： 50 对 × 512 = 25600，文档整块可见
+// 也就是最坏情况反而比原来便宜一半，而重排看到的上下文多了 5 倍。用 top-50 重排
+// 出 top-N 本来也是级联检索的常规深度，重排 400 个候选只是在浪费算力。
+const maxRerankCandidates = 50
+
 // rerankDocument 取用于 cross-encoder 的文档文本：优先 chunk 级内容（含符号名），
-// 否则用文件级 snippet。截断到合理长度，避免过长序列稀释 cross-encoder 的注意力。
+// 否则用文件级 snippet。
 func rerankDocument(hit SearchHit) string {
 	text := hit.Snippet
 	if text == "" {
@@ -182,7 +252,7 @@ func rerankDocument(hit SearchHit) string {
 	if hit.ChunkSymbol != "" {
 		text = hit.ChunkSymbol + "\n" + text
 	}
-	return compactSnippet(text, 1800)
+	return compactSnippet(text, rerankDocumentBytes)
 }
 
 func (s *Store) loadChunkLexicalCandidates(ctx context.Context, match string, limit int, candidates map[int64]*hybridCandidate) error {
@@ -296,7 +366,7 @@ func (s *Store) loadChunkLexicalCandidates(ctx context.Context, match string, li
 }
 
 func (s *Store) loadChunkVectorCandidates(ctx context.Context, query []float32, limit int, candidates map[int64]*hybridCandidate) error {
-	where, args, recallLimit, err := s.vectorRecall(ctx, "chunk_embeddings", s.embedder.Model(), vectorBucket(query), limit)
+	where, args, recallLimit, err := s.vectorRecall(ctx, "chunk_embeddings", s.embedder.Model(), vectorProbes(query), limit)
 	if err != nil {
 		return err
 	}
@@ -327,7 +397,7 @@ func (s *Store) loadChunkVectorCandidates(ctx context.Context, query []float32, 
 		}
 		newVector, newOK := decodeVector(candidate.vectorRaw, candidate.dims)
 		oldVector, oldOK := decodeVector(existing.vectorRaw, existing.dims)
-		if newOK && (!oldOK || cosine(query, newVector) > cosine(query, oldVector)) {
+		if newOK && (!oldOK || cosineSimilarity(query, newVector) > cosineSimilarity(query, oldVector)) {
 			existing.vectorRaw = candidate.vectorRaw
 			existing.dims = candidate.dims
 			if existing.lexRank == 0 {
@@ -434,9 +504,23 @@ func (s *Store) loadLexicalCandidates(ctx context.Context, match string, limit i
 		}
 		return strings.Compare(left.candidate.hit.Path, right.candidate.hit.Path)
 	})
+	// 与 loadChunkLexicalCandidates 一样按 id 合并，而不是覆盖。覆盖只在「这一路
+	// 恰好第一个跑」时才碰巧正确，调用顺序一变就会静默丢掉别路已经攒下的向量与
+	// chunk 定位信息。
 	for index, document := range documents {
-		document.candidate.lexRank = index + 1
-		candidates[document.candidate.id] = document.candidate
+		rank := index + 1
+		existing := candidates[document.candidate.id]
+		if existing == nil {
+			document.candidate.lexRank = rank
+			candidates[document.candidate.id] = document.candidate
+			continue
+		}
+		if existing.lexRank == 0 || rank < existing.lexRank {
+			existing.lexRank = rank
+		}
+		if existing.hit.Snippet == "" {
+			existing.hit.Snippet = document.candidate.hit.Snippet
+		}
 	}
 	return nil
 }
@@ -461,35 +545,58 @@ func termFrequencies(text string) map[string]int {
 	return frequencies
 }
 
+// compactSnippet 把正文压到 limit 字节以内。limit 是字节数，但截断落在字符边界上：
+// 直接 text[:limit] 会把一个多字节字符劈成两半，JSON 编码时被替换成 U+FFFD，
+// 交给 agent 的中文/日文片段末尾就是一个坏字符。
 func compactSnippet(text string, limit int) string {
 	text = strings.TrimSpace(text)
 	if len(text) <= limit {
 		return text
 	}
-	return text[:limit] + "…"
+	return truncateUTF8(text, limit) + "…"
 }
 
-// vectorScanAllThreshold 是向量召回全量扫描的规模阈值。sign-LSH 桶过滤能把大索引的
-// 候选查表降为亚线性，但 query 与文件 embedding 的前 8 维符号一旦不匹配，语义相关文件
-// 会被整桶漏掉——小索引下这个漏召回尤其致命（可能一个都召回不到）。低于该阈值时改全量
-// 扫描，几十万以内的 384 维向量做精确余弦，成本毫秒级，召回完整。
+// vectorScanAllThreshold 是向量召回全量扫描的规模阈值。低于该阈值时不做任何 LSH
+// 过滤，直接对所有向量算精确余弦：几万条 384 维向量的点积是毫秒级，而任何近似
+// 分桶在小索引上都可能一条都召回不到，代价完全不对等。
+//
+// 超过阈值才启用 sign-LSH，并且是 multi-probe（见 vectorProbes）而不是单桶精确
+// 匹配——单桶把「前 8 维符号完全一致」当成了硬性准入条件，那不是相似性判据。
 const vectorScanAllThreshold = 20_000
 
-// vectorRecall 返回向量召回的 WHERE 片段、参数与内/外层 LIMIT。小索引全量扫描
-// （不带 bucket 过滤，LIMIT 用总行数），大索引走桶过滤（LIMIT 用调用方 limit）。
-func (s *Store) vectorRecall(ctx context.Context, table, model string, bucket int64, limit int) (where string, args []any, recallLimit int, err error) {
+// vectorRecall 返回向量召回的 WHERE 片段、参数与 LIMIT。小索引全量精确扫描（不带
+// bucket 过滤，LIMIT 用总行数），大索引走 multi-probe 桶过滤。
+func (s *Store) vectorRecall(ctx context.Context, table, model string, probes []int64, limit int) (where string, args []any, recallLimit int, err error) {
+	// 这个计数只用来在「全量精确扫描」与「LSH 桶过滤」之间二选一，不需要真实总数。
+	// 直接 COUNT(*) 会在每次搜索时扫完整张向量表（百万行索引上是两次全索引扫描，
+	// 只为了做一个布尔判断）。子查询 LIMIT 把代价封顶在 threshold+1 行。
 	var count int
-	if err = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE model=?", model).Scan(&count); err != nil {
+	if err = s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM (SELECT 1 FROM "+table+" WHERE model=? LIMIT ?)",
+		model, vectorScanAllThreshold+1).Scan(&count); err != nil {
 		return "", nil, 0, fmt.Errorf("count vector rows: %w", err)
 	}
 	if count <= vectorScanAllThreshold {
 		return "model=?", []any{model}, max(count, 1), nil
 	}
-	return "model=? AND bucket=?", []any{model, bucket}, limit, nil
+	placeholders := make([]string, len(probes))
+	args = make([]any, 0, len(probes)+1)
+	args = append(args, model)
+	for index, probe := range probes {
+		placeholders[index] = "?"
+		args = append(args, probe)
+	}
+	// 召回上限按探查桶数放大。沿用单桶的 limit 是没有意义的：多出来的桶只会去挤占
+	// 同一个配额，把原本能召回的文档顶掉，一点召回率都换不来。多探桶的全部价值就在
+	// 于多看候选——而候选多了只花 CPU（解码 + 余弦），不会伤精度，因为最终排序用的
+	// 是真实余弦而不是桶。
+	// idx_(chunk_)embeddings_model_bucket 让 IN 走 len(probes) 次索引 seek。
+	return "model=? AND bucket IN (" + strings.Join(placeholders, ",") + ")",
+		args, limit * len(probes), nil
 }
 
 func (s *Store) loadVectorCandidates(ctx context.Context, query []float32, limit int, candidates map[int64]*hybridCandidate) error {
-	where, args, recallLimit, err := s.vectorRecall(ctx, "embeddings", s.embedder.Model(), vectorBucket(query), limit)
+	where, args, recallLimit, err := s.vectorRecall(ctx, "embeddings", s.embedder.Model(), vectorProbes(query), limit)
 	if err != nil {
 		return err
 	}
@@ -603,10 +710,24 @@ func ftsMatch(query string) string {
 		if englishStopwords[strings.ToLower(word)] {
 			continue
 		}
+		// 跳过不含字母或数字的纯符号词（如 "---"）：FTS5 里既没有检索意义，
+		// 又容易触发语法问题。
+		hasAlnum := false
+		for _, r := range word {
+			if unicode.IsLetter(r) || unicode.IsNumber(r) {
+				hasAlnum = true
+				break
+			}
+		}
+		if !hasAlnum {
+			continue
+		}
 		quoted = append(quoted, `"`+strings.ReplaceAll(word, `"`, `""`)+`"`)
 	}
 	if len(quoted) == 0 {
-		return `""`
+		// 没有可检索的词。返回空串让调用方整路跳过；曾经返回的 `""` 是一个空短语，
+		// FTS5 视其为语法错误，会把「全是停用词的 query」变成整次搜索失败。
+		return ""
 	}
 	return strings.Join(quoted, " OR ")
 }

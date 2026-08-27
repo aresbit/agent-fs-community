@@ -147,7 +147,10 @@ type rpcRequest struct {
 
 func (s *HTTPServer) mcp(writer http.ResponseWriter, request *http.Request) {
 	var rpc rpcRequest
-	if !s.decodeJSON(writer, request, &rpc) {
+	// JSON-RPC 信封故意宽松解析。/v1/* 那两个端点用 DisallowUnknownFields 是对的
+	// （拼错字段名应该立刻报错），但 MCP 客户端会在信封上带额外字段，对它们严格
+	// 只会让一个完全合法的请求收到 HTTP 400 和一段不是 JSON-RPC 的错误体。
+	if !s.decodeRPC(writer, request, &rpc) {
 		return
 	}
 	if rpc.JSONRPC != "2.0" || rpc.Method == "" {
@@ -271,6 +274,17 @@ func (s *HTTPServer) callTool(ctx context.Context, name string, raw json.RawMess
 func (s *HTTPServer) decodeJSON(writer http.ResponseWriter, request *http.Request, destination any) bool {
 	decoder := json.NewDecoder(io.LimitReader(request.Body, s.maxBodyBytes))
 	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		s.writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return false
+	}
+	return true
+}
+
+// decodeRPC 解析 JSON-RPC 信封，忽略未知字段。信封里的扩展字段属于协议演进的
+// 正常范围，不该被当成客户端错误。
+func (s *HTTPServer) decodeRPC(writer http.ResponseWriter, request *http.Request, destination any) bool {
+	decoder := json.NewDecoder(io.LimitReader(request.Body, s.maxBodyBytes))
 	if err := decoder.Decode(destination); err != nil {
 		s.writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return false
