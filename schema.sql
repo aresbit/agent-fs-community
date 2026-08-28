@@ -209,4 +209,35 @@ CREATE TRIGGER IF NOT EXISTS tags_ad AFTER DELETE ON tags BEGIN
   WHERE id = old.file_id;
 END;
 
-PRAGMA user_version = 2;
+-- 概念共现图：第三个关系层（文件 → 符号 → 概念）。concept 全局唯一，来源分
+-- heading（Markdown 标题）与 term（bigram 高频术语）。doc_count 是概念出现的
+-- chunk 数，供查询侧派生 PMI；由 indexConcepts/unindexConcepts 在扫描事务里维护。
+CREATE TABLE IF NOT EXISTS concepts (
+  id            INTEGER PRIMARY KEY,
+  name          TEXT    NOT NULL UNIQUE,
+  kind          TEXT    NOT NULL CHECK (kind IN ('heading','term')),
+  doc_count     INTEGER NOT NULL DEFAULT 0,
+  created_at_ns INTEGER NOT NULL
+);
+
+-- 概念出现在哪个 chunk。事实表，靠外键 CASCADE 与 chunks 保持一致。
+CREATE TABLE IF NOT EXISTS concept_occurrences (
+  concept_id INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+  chunk_id   INTEGER NOT NULL REFERENCES chunks(id)  ON DELETE CASCADE,
+  PRIMARY KEY (concept_id, chunk_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_concept_occ_chunk ON concept_occurrences(chunk_id);
+
+-- 物化共现边：同一 chunk 内两两共现，co_count 是共现 chunk 数。无向边存成
+-- (min, max)，查询 Related(a) 时 WHERE src=? OR dst=?，两条索引覆盖。
+CREATE TABLE IF NOT EXISTS concept_edges (
+  src      INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+  dst      INTEGER NOT NULL REFERENCES concepts(id) ON DELETE CASCADE,
+  co_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (src, dst)
+);
+
+CREATE INDEX IF NOT EXISTS idx_concept_edges_dst ON concept_edges(dst, co_count DESC);
+
+PRAGMA user_version = 3;

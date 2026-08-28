@@ -38,6 +38,7 @@ type Store struct {
 	includeNames    map[string]struct{}
 	includePatterns []string
 	allFiles        bool
+	conceptFusion   bool
 	closed          bool
 }
 
@@ -98,6 +99,7 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 		includeNames:    includeNames,
 		includePatterns: includePatterns,
 		allFiles:        opts.AllFiles,
+		conceptFusion:   opts.ConceptFusion,
 	}
 	if store.embedder == nil {
 		store.embedder = NewHashEmbedder(256)
@@ -137,7 +139,7 @@ func (s *Store) initialize(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	if version > 2 {
+	if version > 3 {
 		return fmt.Errorf("community database version %d is incompatible; use a new --db path: %w",
 			version, ErrIncompatibleSchema)
 	}
@@ -184,6 +186,13 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if migratedToV2 {
 		if err := s.rebuildSearchText(ctx); err != nil {
+			return err
+		}
+	}
+	// v3 概念图：三张全新表由 schemaSQL 建出，这里只对迁移前已存在的 chunk 做
+	// backfill。必须在 schemaSQL 之后（concepts 表已存在）才能跑。
+	if hasFiles != 0 && version < 3 {
+		if err := s.backfillConcepts(ctx); err != nil {
 			return err
 		}
 	}
@@ -342,6 +351,67 @@ func (s *Store) commitSegments(ctx context.Context, table string, updates []sear
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit %s segmentation batch: %w", table, err)
+	}
+	return nil
+}
+
+// chunkConceptRow 是概念图 backfill 的一行：一个待提取概念的 chunk。
+type chunkConceptRow struct {
+	id      int64
+	content string
+}
+
+// backfillConcepts 为 v3 迁移前已存在的 chunk 提取概念并建图。分批处理，避免
+// 一次把全部 chunk 读进内存。模式与 backfillSegments 一致：只读不改现有列，
+// 概念图三张表从 chunk.content 全量重算。
+func (s *Store) backfillConcepts(ctx context.Context) error {
+	const batchSize = 200
+	var lastID int64
+	for {
+		rows, err := s.db.QueryContext(ctx,
+			"SELECT id, content FROM chunks WHERE id > ? ORDER BY id LIMIT ?", lastID, batchSize)
+		if err != nil {
+			return fmt.Errorf("read chunks for concept backfill: %w", err)
+		}
+		items := make([]chunkConceptRow, 0, batchSize)
+		for rows.Next() {
+			var r chunkConceptRow
+			if err := rows.Scan(&r.id, &r.content); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan chunk for concept backfill: %w", err)
+			}
+			items = append(items, r)
+			lastID = r.id
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return fmt.Errorf("iterate chunks for concept backfill: %w", err)
+		}
+		if len(items) == 0 {
+			return nil
+		}
+		if err := s.commitConcepts(ctx, items); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *Store) commitConcepts(ctx context.Context, items []chunkConceptRow) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin concept backfill batch: %w", err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, rollbackErr)
+		}
+	}()
+	for _, item := range items {
+		if err := indexConcepts(ctx, tx, item.id, extractConcepts(item.content)); err != nil {
+			return fmt.Errorf("index concepts for chunk %d: %w", item.id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit concept backfill batch: %w", err)
 	}
 	return nil
 }

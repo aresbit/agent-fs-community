@@ -336,6 +336,11 @@ func (s *Store) commitScan(ctx context.Context, root string, entries []scannedEn
 }
 
 func (s *Store) replaceChunks(ctx context.Context, tx *sql.Tx, fileID int64, chunks []parsedChunk, indexedAt int64) error {
+	// 概念图一致性：先撤销旧 chunk 的共现贡献（concept_edges 要显式减），再删旧
+	// chunk（concept_occurrences 靠外键 CASCADE 删）。
+	if err := s.unindexFileConcepts(ctx, tx, fileID); err != nil {
+		return fmt.Errorf("unindex concepts for file %d: %w", fileID, err)
+	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM chunks WHERE file_id=?", fileID); err != nil {
 		return fmt.Errorf("delete old chunks: %w", err)
 	}
@@ -347,6 +352,9 @@ func (s *Store) replaceChunks(ctx context.Context, tx *sql.Tx, fileID int64, chu
 			chunk.symbol, chunk.start, chunk.end, chunk.content, chunk.hash, chunk.searchText).Scan(&chunkID); err != nil {
 			return fmt.Errorf("insert chunk %d: %w", chunk.ordinal, err)
 		}
+		if err := indexConcepts(ctx, tx, chunkID, extractConcepts(chunk.content)); err != nil {
+			return fmt.Errorf("index concepts for chunk %d: %w", chunk.ordinal, err)
+		}
 		if len(chunk.vector) == 0 {
 			continue
 		}
@@ -355,6 +363,34 @@ func (s *Store) replaceChunks(ctx context.Context, tx *sql.Tx, fileID int64, chu
 		) VALUES (?, ?, ?, ?, ?, ?, ?)`, chunkID, s.embedder.Model(), len(chunk.vector),
 			vectorBucket(chunk.vector), encodeVector(chunk.vector), chunk.hash, indexedAt); err != nil {
 			return fmt.Errorf("insert chunk embedding %d: %w", chunk.ordinal, err)
+		}
+	}
+	return nil
+}
+
+// unindexFileConcepts 撤销一个文件所有 chunk 的概念图贡献（减共现 + doc_count）。
+// replaceChunks 在删除旧 chunk 前调用它，保证 concept_edges 与 concept_occurrences
+// 一致（后者靠外键 CASCADE 删，前者必须显式减）。
+func (s *Store) unindexFileConcepts(ctx context.Context, tx *sql.Tx, fileID int64) error {
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM chunks WHERE file_id=?", fileID)
+	if err != nil {
+		return fmt.Errorf("read chunks for concept unindex: %w", err)
+	}
+	ids := make([]int64, 0, 16)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan chunk for concept unindex: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return fmt.Errorf("iterate chunks for concept unindex: %w", err)
+	}
+	for _, id := range ids {
+		if err := unindexConcepts(ctx, tx, id); err != nil {
+			return err
 		}
 	}
 	return nil

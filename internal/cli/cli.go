@@ -39,6 +39,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var includePatterns stringList
 	global.Var(&includePatterns, "include-file", "additional included file basename glob (repeatable)")
 	allFiles := global.Bool("all-files", false, "index every file type instead of the source/Markdown allowlist")
+	conceptFusion := global.Bool("concept-fusion", false, "fuse concept co-occurrence as a third hybrid-search signal")
 	global.Usage = func() { writeUsage(stderr) }
 	if err := global.Parse(args); err != nil {
 		return 2
@@ -93,6 +94,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		NoDefaultExcludes: *noDefaultExcludes,
 		IncludePatterns:   includePatterns,
 		AllFiles:          *allFiles,
+		ConceptFusion:     *conceptFusion,
 	})
 	if err != nil {
 		writeError(stderr, err)
@@ -181,6 +183,24 @@ func dispatch(ctx context.Context, store *agentfs.Store, command string, args []
 			return usageError("find requires a phrase")
 		}
 		result, err := store.Search(ctx, args[0])
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, result)
+	case "related":
+		if len(args) != 1 {
+			return usageError("related requires a concept name")
+		}
+		result, err := store.Related(ctx, args[0], 20)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, result)
+	case "concept-occurrences":
+		if len(args) != 1 {
+			return usageError("concept-occurrences requires a concept name")
+		}
+		result, err := store.ConceptOccurrences(ctx, args[0], 20)
 		if err != nil {
 			return err
 		}
@@ -394,6 +414,8 @@ Commands:
   query 'SELECT ...'           run bounded read-only SQL and emit JSON
   ls PATH                      list indexed direct children
   find PHRASE                  FTS5 phrase search over name/path/tag/content
+  related CONCEPT              co-occurring concepts, ranked by co_count·PMI
+  concept-occurrences CONCEPT  files where CONCEPT is indexed
   big MIB                      list regular files larger than MIB
   du PATH                      aggregate an indexed subtree
   by-tag TAG                   list paths carrying TAG

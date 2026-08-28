@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/clems4ever/all-minilm-l6-v2-go v0.0.9
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/go-ego/gse v1.0.2
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/sugarme/tokenizer v0.3.0
 	github.com/yalue/onnxruntime_go v1.21.0
@@ -23,6 +24,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/schollz/progressbar/v2 v2.15.0 // indirect
 	github.com/sugarme/regexpset v0.0.0-20200920021344-4d4ec8eaf93c // indirect
+	github.com/vcaesar/cedar v0.30.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/sys v0.34.0 // indirect
 	golang.org/x/text v0.25.0 // indirect

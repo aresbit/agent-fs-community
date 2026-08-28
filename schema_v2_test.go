@@ -139,8 +139,8 @@ func TestMigrationFromV1BackfillsSearchText(t *testing.T) {
 	if err := reopened.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("user_version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("user_version = %d, want 3", version)
 	}
 	stored, err := reopened.Query(t.Context(),
 		"SELECT search_text FROM files WHERE kind='file' AND search_text != ''")

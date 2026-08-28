@@ -39,13 +39,14 @@ type SearchHit struct {
 }
 
 type hybridCandidate struct {
-	id        int64
-	hit       SearchHit
-	lexRank   int
-	vecRank   int
-	vectorRaw []byte
-	dims      int
-	tagsText  string
+	id          int64
+	hit         SearchHit
+	lexRank     int
+	vecRank     int
+	conceptRank int
+	vectorRaw   []byte
+	dims        int
+	tagsText    string
 }
 
 // HybridSearch combines ranked FTS5/BM25 candidates, sign-LSH vector
@@ -87,6 +88,11 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 		if err := s.loadChunkVectorCandidates(ctx, queryVector, candidateLimit*4, candidates); err != nil {
 			return nil, err
 		}
+		if s.conceptFusion {
+			if err := s.loadConceptCandidates(ctx, request.Query, candidateLimit, candidates); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := s.loadMetadataCandidates(ctx, request, candidateLimit, candidates); err != nil {
 		return nil, err
@@ -103,7 +109,7 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 				candidate.hit.VectorScore = max(0, cosineSimilarity(queryVector, vector))
 			}
 		}
-		if request.Query != "" && candidate.lexRank == 0 && candidate.hit.VectorScore <= 0 {
+		if request.Query != "" && candidate.lexRank == 0 && candidate.hit.VectorScore <= 0 && candidate.conceptRank == 0 {
 			continue
 		}
 		age := now.Sub(time.Unix(0, candidate.hit.MTimeNS))
@@ -114,9 +120,18 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 	hits := make([]SearchHit, 0, len(surviving))
 	for _, candidate := range surviving {
 		candidate.hit.BM25Score = reciprocalRank(candidate.lexRank)
-		candidate.hit.Score = 0.52*candidate.hit.BM25Score +
-			0.38*reciprocalRank(candidate.vecRank) +
-			0.10*candidate.hit.MetadataScore
+		if s.conceptFusion {
+			// 概念共现作为第三路信号，权重从词法/向量各让出 0.05。总分仍为 1.0，
+			// 便于与 baseline（无概念融合）在同一尺度上对比。
+			candidate.hit.Score = 0.47*candidate.hit.BM25Score +
+				0.34*reciprocalRank(candidate.vecRank) +
+				0.09*candidate.hit.MetadataScore +
+				0.10*reciprocalRank(candidate.conceptRank)
+		} else {
+			candidate.hit.Score = 0.52*candidate.hit.BM25Score +
+				0.38*reciprocalRank(candidate.vecRank) +
+				0.10*candidate.hit.MetadataScore
+		}
 		hits = append(hits, candidate.hit)
 	}
 	slices.SortFunc(hits, byDescendingScore)
@@ -234,8 +249,10 @@ const rerankDocumentBytes = 1800
 // 收口，否则一次搜索的推理量会失控。
 //
 // 成本对照（以 token 位置计，batch×seq）：
-//   旧：400 对 × 128 = 51200，但文档只有 ~100 token 进得了模型
-//   新： 50 对 × 512 = 25600，文档整块可见
+//
+//	旧：400 对 × 128 = 51200，但文档只有 ~100 token 进得了模型
+//	新： 50 对 × 512 = 25600，文档整块可见
+//
 // 也就是最坏情况反而比原来便宜一半，而重排看到的上下文多了 5 倍。用 top-50 重排
 // 出 top-N 本来也是级联检索的常规深度，重排 400 个候选只是在浪费算力。
 const maxRerankCandidates = 50
@@ -410,6 +427,60 @@ func (s *Store) loadChunkVectorCandidates(ctx context.Context, query []float32, 
 				existing.hit.StartLine = candidate.hit.StartLine
 				existing.hit.EndLine = candidate.hit.EndLine
 			}
+		}
+	}
+	return rows.Err()
+}
+
+// loadConceptCandidates 用概念共现图召回候选：把查询切成概念词，查它们的高共现
+// 邻居，把邻居概念所在的文件作为额外候选（conceptRank 一路）。这是第三个关系层
+// （文件→符号→概念）参与检索的入口：查询命中概念 A，A 的共现邻居 B 所在的文件
+// 即使不含查询词，也因「知识结构相关」被召回。
+func (s *Store) loadConceptCandidates(ctx context.Context, query string, limit int, candidates map[int64]*hybridCandidate) error {
+	terms := segmentQuery(query)
+	if len(terms) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(terms))
+	arguments := make([]any, 0, len(terms)+1)
+	for index, term := range terms {
+		placeholders[index] = "?"
+		arguments = append(arguments, term)
+	}
+	arguments = append(arguments, limit)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT f.id, f.path, f.kind, f.size, f.mtime_ns, f.mime, f.tags_text,
+		       COUNT(DISTINCT c2.id) AS strength
+		FROM concepts c1
+		JOIN concept_edges e ON e.src = c1.id OR e.dst = c1.id
+		JOIN concepts c2 ON c2.id = CASE WHEN e.src = c1.id THEN e.dst ELSE e.src END
+		JOIN concept_occurrences co ON co.concept_id = c2.id
+		JOIN chunks c ON c.id = co.chunk_id
+		JOIN files f ON f.id = c.file_id
+		WHERE c1.name IN (`+strings.Join(placeholders, ",")+`)
+		GROUP BY f.id
+		ORDER BY strength DESC
+		LIMIT ?`, arguments...)
+	if err != nil {
+		return fmt.Errorf("recall concept candidates: %w", err)
+	}
+	defer rows.Close()
+	rank := 0
+	for rows.Next() {
+		candidate := &hybridCandidate{}
+		var strength int
+		if err := rows.Scan(&candidate.id, &candidate.hit.Path, &candidate.hit.Kind,
+			&candidate.hit.Size, &candidate.hit.MTimeNS, &candidate.hit.MIME, &candidate.tagsText,
+			&strength); err != nil {
+			return fmt.Errorf("scan concept candidate: %w", err)
+		}
+		rank++
+		existing := candidates[candidate.id]
+		if existing == nil {
+			candidate.conceptRank = rank
+			candidates[candidate.id] = candidate
+		} else {
+			existing.conceptRank = rank
 		}
 	}
 	return rows.Err()

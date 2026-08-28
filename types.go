@@ -33,6 +33,9 @@ type Options struct {
 	NoDefaultExcludes bool
 	IncludePatterns   []string
 	AllFiles          bool
+	// ConceptFusion 开启后，HybridSearch 把概念共现图作为第三路召回信号（查询概念
+	// 的共现邻居所在文件）参与融合。默认关闭：需要 benchmark 佐证有正收益再打开。
+	ConceptFusion bool
 }
 
 // ScanOptions controls one complete, transactional root scan.
