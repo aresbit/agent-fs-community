@@ -95,7 +95,12 @@ func (s *Store) Search(ctx context.Context, phrase string) (QueryResult, error) 
 	if phrase == "" {
 		return QueryResult{}, fmt.Errorf("search: empty phrase: %w", os.ErrInvalid)
 	}
-	match := `"` + strings.ReplaceAll(phrase, `"`, `""`) + `"`
+	// 走与 HybridSearch 相同的编译器，中文才能命中 search_text 里的 bigram。
+	// 原来的做法是把整句话当一个 FTS5 短语，对中文等于要求整段连写完全一致。
+	match := ftsMatch(phrase)
+	if match == "" {
+		return QueryResult{}, fmt.Errorf("search: no searchable terms in %q: %w", phrase, os.ErrInvalid)
+	}
 	return s.Query(ctx, `
 		SELECT f.path, f.kind, f.size, f.mtime_ns,
 		       snippet(files_fts, 3, '[', ']', '…', 24) AS snippet,
@@ -296,15 +301,19 @@ func isSafePragma(statement string) bool {
 	}
 }
 
-// RebuildFTS reconstructs the external-content full-text index from files.
+// RebuildFTS reconstructs both external-content full-text indexes.
+//
+// search_text 也会一并重算：它是 Go 侧分词的产物，SQLite 自己算不出来，而 'rebuild'
+// 只会照着基表现有的列值重建倒排索引。只 rebuild 不重算分词，等于把旧的分词结果
+// 又原样索引一遍。
 func (s *Store) RebuildFTS(ctx context.Context) error {
 	if err := s.checkOpen(); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, "INSERT INTO files_fts(files_fts) VALUES ('rebuild')"); err != nil {
-		return fmt.Errorf("rebuild full-text index: %w", err)
+	if err := s.backfillSearchText(ctx); err != nil {
+		return err
 	}
-	return nil
+	return s.rebuildSearchText(ctx)
 }
 
 // Check verifies SQLite integrity, foreign keys, FTS cardinality, and indexed

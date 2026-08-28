@@ -72,16 +72,14 @@ func (s *Store) HybridSearch(ctx context.Context, request HybridRequest) ([]Sear
 		if err != nil {
 			return nil, fmt.Errorf("embed search query: %w", err)
 		}
-		// 空 match 表示 query 里没有任何可检索的词（全是停用词或全是标点）。
-		// 这一路必须整体跳过：把空短语交给 FTS5 是语法错误，会让整次搜索失败，
-		// 而向量一路本来就还能独立回答这种纯语义 query。
-		if match := ftsMatch(request.Query); match != "" {
-			if err := s.loadLexicalCandidates(ctx, match, candidateLimit, candidates); err != nil {
-				return nil, err
-			}
-			if err := s.loadChunkLexicalCandidates(ctx, match, candidateLimit, candidates); err != nil {
-				return nil, err
-			}
+		// 两个 loader 收原始 query，自己去编译 FTS 表达式并在没有可检索词时跳过。
+		// 打分要用的词必须来自同一个分词器（analyzeTerms），不能从 FTS 表达式反解
+		// ——那样等于把分词逻辑分叉成两份。
+		if err := s.loadLexicalCandidates(ctx, request.Query, candidateLimit, candidates); err != nil {
+			return nil, err
+		}
+		if err := s.loadChunkLexicalCandidates(ctx, request.Query, candidateLimit, candidates); err != nil {
+			return nil, err
 		}
 		if err := s.loadVectorCandidates(ctx, queryVector, candidateLimit*4, candidates); err != nil {
 			return nil, err
@@ -255,7 +253,13 @@ func rerankDocument(hit SearchHit) string {
 	return compactSnippet(text, rerankDocumentBytes)
 }
 
-func (s *Store) loadChunkLexicalCandidates(ctx context.Context, match string, limit int, candidates map[int64]*hybridCandidate) error {
+func (s *Store) loadChunkLexicalCandidates(ctx context.Context, query string, limit int, candidates map[int64]*hybridCandidate) error {
+	match := ftsMatch(query)
+	if match == "" {
+		// query 里没有任何可检索的词（全是停用词或全是标点）。整路跳过：把空短语
+		// 交给 FTS5 是语法错误，会让整次搜索失败，而向量一路仍能独立回答。
+		return nil
+	}
 	rowIDRows, err := s.db.QueryContext(ctx, `SELECT rowid FROM chunks_fts
 		WHERE chunks_fts MATCH ? LIMIT ?`, match, limit)
 	if err != nil {
@@ -316,7 +320,7 @@ func (s *Store) loadChunkLexicalCandidates(ctx context.Context, match string, li
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate recalled chunks: %w", err)
 	}
-	queryTerms := queryTermsFromMatch(match)
+	queryTerms := distinctTerms(analyzeTerms(query))
 	var averageLength float64
 	for _, document := range documents {
 		averageLength += float64(document.length)
@@ -411,7 +415,11 @@ func (s *Store) loadChunkVectorCandidates(ctx context.Context, query []float32, 
 	return rows.Err()
 }
 
-func (s *Store) loadLexicalCandidates(ctx context.Context, match string, limit int, candidates map[int64]*hybridCandidate) error {
+func (s *Store) loadLexicalCandidates(ctx context.Context, query string, limit int, candidates map[int64]*hybridCandidate) error {
+	match := ftsMatch(query)
+	if match == "" {
+		return nil
+	}
 	rowIDRows, err := s.db.QueryContext(ctx, `SELECT rowid FROM files_fts
 		WHERE files_fts MATCH ? LIMIT ?`, match, limit)
 	if err != nil {
@@ -472,7 +480,7 @@ func (s *Store) loadLexicalCandidates(ctx context.Context, match string, limit i
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate recalled files: %w", err)
 	}
-	queryTerms := queryTermsFromMatch(match)
+	queryTerms := distinctTerms(analyzeTerms(query))
 	var averageLength float64
 	for _, document := range documents {
 		averageLength += float64(document.length)
@@ -481,13 +489,13 @@ func (s *Store) loadLexicalCandidates(ctx context.Context, match string, limit i
 	for _, term := range queryTerms {
 		documentFrequency := 0
 		for _, document := range documents {
-			if document.terms[strings.ToLower(term)] > 0 {
+			if document.terms[term] > 0 {
 				documentFrequency++
 			}
 		}
 		idf := math.Log(1 + (float64(len(documents)-documentFrequency)+0.5)/(float64(documentFrequency)+0.5))
 		for index := range documents {
-			frequency := float64(documents[index].terms[strings.ToLower(term)])
+			frequency := float64(documents[index].terms[term])
 			if frequency == 0 {
 				continue
 			}
@@ -525,21 +533,9 @@ func (s *Store) loadLexicalCandidates(ctx context.Context, match string, limit i
 	return nil
 }
 
-func queryTermsFromMatch(match string) []string {
-	queryTerms := make([]string, 0, 8)
-	for _, term := range strings.Fields(strings.ReplaceAll(match, `"`, "")) {
-		if !strings.EqualFold(term, "OR") {
-			queryTerms = append(queryTerms, strings.ToLower(term))
-		}
-	}
-	return queryTerms
-}
-
 func termFrequencies(text string) map[string]int {
 	frequencies := make(map[string]int)
-	for _, term := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' && r != '-'
-	}) {
+	for _, term := range analyzeTerms(text) {
 		frequencies[term]++
 	}
 	return frequencies
@@ -701,28 +697,43 @@ var englishStopwords = map[string]bool{
 	"just": true, "here": true, "there": true, "now": true, "too": true,
 }
 
+// ftsMatch 把自然语言 query 编译成 FTS5 表达式。
+//
+// CJK 段同时产出两种形式，OR 在一起：
+//   - 整段短语。files_fts/chunks_fts 目前用 unicode61，一整段连写的汉字在索引里就是
+//     一个 token，只有整段短语能命中它。不发这个会让今天已经能查到的用例退化。
+//   - 逐个 bigram。unicode61 不做中缀匹配，所以 bigram 现在基本命不中；等 FTS 改成
+//     索引分词后的文本（见 tokenize.go），bigram 才是真正生效的那一半。现在就发出来
+//     没有副作用（OR 只扩召回），换索引时查询侧不用再动。
 func ftsMatch(query string) string {
-	words := strings.FieldsFunc(query, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' && r != '-'
-	})
-	quoted := make([]string, 0, len(words))
-	for _, word := range words {
-		if englishStopwords[strings.ToLower(word)] {
-			continue
-		}
+	quoted := make([]string, 0, 8)
+	seen := make(map[string]struct{}, 8)
+	add := func(term string) {
 		// 跳过不含字母或数字的纯符号词（如 "---"）：FTS5 里既没有检索意义，
 		// 又容易触发语法问题。
-		hasAlnum := false
-		for _, r := range word {
-			if unicode.IsLetter(r) || unicode.IsNumber(r) {
-				hasAlnum = true
-				break
-			}
+		if !strings.ContainsFunc(term, func(r rune) bool {
+			return unicode.IsLetter(r) || unicode.IsNumber(r)
+		}) {
+			return
 		}
-		if !hasAlnum {
+		if _, ok := seen[term]; ok {
+			return
+		}
+		seen[term] = struct{}{}
+		quoted = append(quoted, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	for _, run := range scriptRuns(query) {
+		if !run.cjk {
+			if englishStopwords[run.text] {
+				continue
+			}
+			add(run.text)
 			continue
 		}
-		quoted = append(quoted, `"`+strings.ReplaceAll(word, `"`, `""`)+`"`)
+		add(run.text)
+		for _, gram := range cjkBigrams(run.text) {
+			add(gram)
+		}
 	}
 	if len(quoted) == 0 {
 		// 没有可检索的词。返回空串让调用方整路跳过；曾经返回的 `""` 是一个空短语，

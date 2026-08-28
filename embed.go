@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 )
 
 // Embedder maps text into a fixed-dimensional vector. Implementations must be
@@ -38,14 +37,16 @@ func NewHashEmbedder(dimensions int) *HashEmbedder {
 	return &HashEmbedder{dimensions: dimensions}
 }
 
-func (h *HashEmbedder) Model() string   { return fmt.Sprintf("agentfs-hash-v1-%d", h.dimensions) }
+// Model 里的 v2 是分词版本，不是代码版本：v1 按 Unicode 字母类别切词，一整段中文
+// 会变成一个词，两段中文之间几乎不可能有词重叠，兜底 embedder 对中文完全失效。
+// v2 改用 analyzeTerms（CJK 切 bigram）。向量召回都带 `WHERE model=?`，所以旧的
+// v1 向量会自动被忽略，重新 scan 一次即可，不需要 schema 迁移。
+func (h *HashEmbedder) Model() string   { return fmt.Sprintf("agentfs-hash-v2-%d", h.dimensions) }
 func (h *HashEmbedder) Dimensions() int { return h.dimensions }
 
 func (h *HashEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	vector := make([]float32, h.dimensions)
-	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' && r != '-'
-	})
+	words := analyzeTerms(text)
 	for index, word := range words {
 		if index&255 == 0 {
 			if err := ctx.Err(); err != nil {

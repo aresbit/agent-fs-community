@@ -24,6 +24,7 @@ type scannedEntry struct {
 	contentHead string
 	contentHash string
 	mime        string
+	searchText  string
 	vector      []float32
 	chunks      []parsedChunk
 	symbols     []symbolDef
@@ -158,6 +159,12 @@ func (s *Store) describePath(ctx context.Context, path string, info fs.FileInfo)
 	default:
 		entry.kind = "other"
 	}
+	// CJK bigram 补充索引文本，覆盖与 files_fts 其余列相同的三段内容。
+	entry.searchText = segmentCJKIndex(entry.name + " " + entry.path + " " + entry.contentHead)
+	for index := range entry.chunks {
+		entry.chunks[index].searchText = segmentCJKIndex(
+			entry.chunks[index].symbol + " " + entry.chunks[index].content)
+	}
 	vector, err := s.embedder.Embed(ctx, entry.name+"\n"+entry.path+"\n"+entry.contentHead)
 	if err != nil {
 		return scannedEntry{}, fmt.Errorf("embed %s: %w", path, err)
@@ -240,8 +247,8 @@ func (s *Store) commitScan(ctx context.Context, root string, entries []scannedEn
 		err := tx.QueryRowContext(ctx, `
 			INSERT INTO files(
 				parent_id, scan_root, name, path, kind, size, mtime_ns,
-				link_target, content_head, content_hash, mime, indexed_at_ns
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				link_target, content_head, content_hash, mime, search_text, indexed_at_ns
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(path) DO UPDATE SET
 				parent_id=excluded.parent_id,
 				scan_root=excluded.scan_root,
@@ -253,10 +260,11 @@ func (s *Store) commitScan(ctx context.Context, root string, entries []scannedEn
 				content_head=excluded.content_head,
 				content_hash=excluded.content_hash,
 				mime=excluded.mime,
+				search_text=excluded.search_text,
 				indexed_at_ns=excluded.indexed_at_ns
 			RETURNING id`, parentID, root, entry.name, entry.path, entry.kind,
 			entry.size, entry.mtimeNS, entry.linkTarget,
-			entry.contentHead, entry.contentHash, entry.mime, indexedAt).Scan(&id)
+			entry.contentHead, entry.contentHash, entry.mime, entry.searchText, indexedAt).Scan(&id)
 		if err != nil {
 			return fmt.Errorf("upsert %s: %w", entry.path, err)
 		}
@@ -334,9 +342,9 @@ func (s *Store) replaceChunks(ctx context.Context, tx *sql.Tx, fileID int64, chu
 	for _, chunk := range chunks {
 		var chunkID int64
 		if err := tx.QueryRowContext(ctx, `INSERT INTO chunks(
-			file_id, ordinal, language, symbol, start_line, end_line, content, content_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`, fileID, chunk.ordinal, chunk.language,
-			chunk.symbol, chunk.start, chunk.end, chunk.content, chunk.hash).Scan(&chunkID); err != nil {
+			file_id, ordinal, language, symbol, start_line, end_line, content, content_hash, search_text
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`, fileID, chunk.ordinal, chunk.language,
+			chunk.symbol, chunk.start, chunk.end, chunk.content, chunk.hash, chunk.searchText).Scan(&chunkID); err != nil {
 			return fmt.Errorf("insert chunk %d: %w", chunk.ordinal, err)
 		}
 		if len(chunk.vector) == 0 {

@@ -176,10 +176,10 @@ func (s *Store) commitIncrementalBatch(ctx context.Context, root string, entries
 		parentID := incrementalParentID(entry.path, ids, parentIDs)
 		var id int64
 		var returnedPath string
-		if err := tx.QueryRowContext(ctx, incrementalFileUpsertSQL("(?,?,?,?,?,?,?,?,?,?,?,?)"),
+		if err := tx.QueryRowContext(ctx, incrementalFileUpsertSQL("(?,?,?,?,?,?,?,?,?,?,?,?,?)"),
 			parentID, root, entry.name, entry.path, entry.kind, entry.size,
 			entry.mtimeNS, entry.linkTarget,
-			entry.contentHead, entry.contentHash, entry.mime, indexedAt).Scan(&id, &returnedPath); err != nil {
+			entry.contentHead, entry.contentHash, entry.mime, entry.searchText, indexedAt).Scan(&id, &returnedPath); err != nil {
 			return fmt.Errorf("incrementally upsert %s: %w", entry.path, err)
 		}
 		if returnedPath != entry.path {
@@ -190,13 +190,14 @@ func (s *Store) commitIncrementalBatch(ctx context.Context, root string, entries
 	const fileBatchSize = 200
 	for start := 0; start < len(files); start += fileBatchSize {
 		end := min(start+fileBatchSize, len(files))
-		arguments := make([]any, 0, (end-start)*12)
+		arguments := make([]any, 0, (end-start)*incrementalFileColumns)
 		for _, entry := range files[start:end] {
 			arguments = append(arguments, incrementalParentID(entry.path, ids, parentIDs), root,
 				entry.name, entry.path, entry.kind, entry.size, entry.mtimeNS, entry.linkTarget,
-				entry.contentHead, entry.contentHash, entry.mime, indexedAt)
+				entry.contentHead, entry.contentHash, entry.mime, entry.searchText, indexedAt)
 		}
-		rows, err := tx.QueryContext(ctx, incrementalFileUpsertSQL(valuesClause(end-start, 12)), arguments...)
+		rows, err := tx.QueryContext(ctx,
+			incrementalFileUpsertSQL(valuesClause(end-start, incrementalFileColumns)), arguments...)
 		if err != nil {
 			return fmt.Errorf("incrementally upsert file batch: %w", err)
 		}
@@ -243,15 +244,20 @@ func incrementalParentID(path string, inserted, indexed map[string]int64) any {
 	return nil
 }
 
+// incrementalFileColumns 是 incrementalFileUpsertSQL 绑定的列数。改列表必须同步改
+// 这个常量和所有 valuesClause 调用——数错一个占位符，报错会出现在完全无关的地方。
+const incrementalFileColumns = 13
+
 func incrementalFileUpsertSQL(values string) string {
 	return `INSERT INTO files(parent_id,scan_root,name,path,kind,size,
-		mtime_ns,link_target,content_head,content_hash,mime,indexed_at_ns) VALUES ` + values + `
+		mtime_ns,link_target,content_head,content_hash,mime,search_text,indexed_at_ns) VALUES ` + values + `
 		ON CONFLICT(path) DO UPDATE SET parent_id=excluded.parent_id,
 		scan_root=excluded.scan_root,name=excluded.name,kind=excluded.kind,
 		size=excluded.size,
 		mtime_ns=excluded.mtime_ns,link_target=excluded.link_target,
 		content_head=excluded.content_head,content_hash=excluded.content_hash,
-		mime=excluded.mime,indexed_at_ns=excluded.indexed_at_ns RETURNING id,path`
+		mime=excluded.mime,search_text=excluded.search_text,
+		indexed_at_ns=excluded.indexed_at_ns RETURNING id,path`
 }
 
 func loadPathIDs(ctx context.Context, tx *sql.Tx, paths []string) (map[string]int64, error) {
@@ -343,15 +349,15 @@ func (s *Store) writeIncrementalRelations(ctx context.Context, tx *sql.Tx,
 	vectors := make([]chunkVector, 0, len(chunks))
 	for start := 0; start < len(chunks); start += relationBatchSize {
 		end := min(start+relationBatchSize, len(chunks))
-		arguments := make([]any, 0, (end-start)*8)
+		arguments := make([]any, 0, (end-start)*9)
 		for _, item := range chunks[start:end] {
 			chunk := item.chunk
 			arguments = append(arguments, item.fileID, chunk.ordinal, chunk.language, chunk.symbol,
-				chunk.start, chunk.end, chunk.content, chunk.hash)
+				chunk.start, chunk.end, chunk.content, chunk.hash, chunk.searchText)
 		}
 		rows, err := tx.QueryContext(ctx, `INSERT INTO chunks(
-			file_id,ordinal,language,symbol,start_line,end_line,content,content_hash) VALUES `+
-			valuesClause(end-start, 8)+` RETURNING id,file_id,ordinal`, arguments...)
+			file_id,ordinal,language,symbol,start_line,end_line,content,content_hash,search_text) VALUES `+
+			valuesClause(end-start, 9)+` RETURNING id,file_id,ordinal`, arguments...)
 		if err != nil {
 			return fmt.Errorf("insert changed chunk batch: %w", err)
 		}

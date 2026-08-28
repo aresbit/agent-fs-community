@@ -39,7 +39,9 @@ type parsedChunk struct {
 	end      int
 	content  string
 	hash     string
-	vector   []float32
+	// searchText 是 CJK bigram 补充索引文本，由 scan 阶段填充（见 segmentCJKIndex）。
+	searchText string
+	vector     []float32
 }
 
 func extractDocument(ctx context.Context, path string, limit int) (parsedDocument, error) {
