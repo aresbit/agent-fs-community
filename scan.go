@@ -29,6 +29,48 @@ type scannedEntry struct {
 	chunks      []parsedChunk
 	symbols     []symbolDef
 	refs        []symbolRef
+	// reused 表示该条目的内容指纹与上次索引一致（仅 SkipUnchanged 扫描置真），
+	// commitScan 只把它记入 seen 集合并保留既有行，不再重写 files/chunks/向量。
+	reused bool
+}
+
+// priorFingerprint is one previously-indexed row under a scan root, keyed by
+// path. When the current stat matches kind/size/mtime and the stored vector
+// model is still the active one, the entry is reused instead of reprocessed.
+type priorFingerprint struct {
+	id      int64
+	kind    string
+	size    int64
+	mtimeNS int64
+	model   string
+}
+
+func (s *Store) loadPriorFingerprints(ctx context.Context, root string) (map[string]priorFingerprint, error) {
+	rootPrefix := strings.TrimSuffix(root, string(os.PathSeparator)) + string(os.PathSeparator)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT f.id, f.path, f.kind, f.size, f.mtime_ns, COALESCE(e.model, '')
+		FROM files f
+		LEFT JOIN embeddings e ON e.file_id = f.id
+		WHERE f.path = ? OR substr(f.path, 1, length(?)) = ?`,
+		root, rootPrefix, rootPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("read prior scan fingerprints: %w", err)
+	}
+	defer rows.Close()
+	prior := make(map[string]priorFingerprint, 4096)
+	for rows.Next() {
+		var fingerprint priorFingerprint
+		var path string
+		if err := rows.Scan(&fingerprint.id, &path, &fingerprint.kind,
+			&fingerprint.size, &fingerprint.mtimeNS, &fingerprint.model); err != nil {
+			return nil, fmt.Errorf("scan prior fingerprint: %w", err)
+		}
+		prior[path] = fingerprint
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	return prior, nil
 }
 
 // Scan replaces the indexed view of root in one SQLite transaction.
@@ -49,21 +91,43 @@ func (s *Store) Scan(ctx context.Context, root string, opts ScanOptions) (ScanRe
 	if root == s.path {
 		return ScanResult{}, ErrUnsafePath
 	}
+	var prior map[string]priorFingerprint
+	if opts.SkipUnchanged {
+		prior, err = s.loadPriorFingerprints(ctx, root)
+		if err != nil {
+			return ScanResult{}, err
+		}
+	}
 	started := time.Now()
-	entries, err := s.collect(ctx, root)
+	entries, err := s.collect(ctx, root, prior)
 	if err != nil {
 		return ScanResult{}, err
 	}
 	if len(entries) == 0 {
 		return ScanResult{}, fmt.Errorf("scan %s: root was excluded: %w", root, ErrUnsafePath)
 	}
-	if err := s.commitScan(ctx, root, entries, opts, started); err != nil {
+	if err := s.commitScan(ctx, root, entries, prior, opts, started); err != nil {
 		return ScanResult{}, err
 	}
 	return ScanResult{Root: root, Entries: len(entries), Duration: time.Since(started)}, nil
 }
 
-func (s *Store) collect(ctx context.Context, root string) ([]scannedEntry, error) {
+// scanKind mirrors describePath's mode classification so the reuse fast path
+// can compare against the kind string stored in the prior index.
+func scanKind(mode fs.FileMode) string {
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsDir():
+		return "dir"
+	case mode.IsRegular():
+		return "file"
+	default:
+		return "other"
+	}
+}
+
+func (s *Store) collect(ctx context.Context, root string, prior map[string]priorFingerprint) ([]scannedEntry, error) {
 	entries := make([]scannedEntry, 0, 256)
 	err := filepath.WalkDir(root, func(path string, dirEntry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
@@ -96,6 +160,33 @@ func (s *Store) collect(ctx context.Context, root string) ([]scannedEntry, error
 				return nil
 			}
 			return err
+		}
+		// SkipUnchanged fast path: when the stored index already covers this
+		// path with the same kind/content fingerprint and the same embedding
+		// model, reuse the existing row instead of re-reading, re-parsing and
+		// re-embedding it. This is what makes a daemon restart over an
+		// unchanged tree converge in seconds instead of re-embedding every
+		// file and chunk. Changed, new, excluded and model-mismatched entries
+		// all fall through to the full path below.
+		if kind := scanKind(info.Mode()); kind != "symlink" {
+			if previous, exists := prior[path]; exists &&
+				previous.kind == kind &&
+				// A directory row stores size 0 by design (describePath), so its
+				// fingerprint is kind+mtime only; mtime changes whenever a direct
+				// child is added or removed. Regular files compare size and mtime.
+				(previous.kind == "dir" || previous.size == info.Size()) &&
+				previous.mtimeNS == info.ModTime().UnixNano() &&
+				previous.model == s.embedder.Model() {
+				entries = append(entries, scannedEntry{
+					name:    filepath.Base(path),
+					path:    filepath.Clean(path),
+					kind:    kind,
+					size:    info.Size(),
+					mtimeNS: info.ModTime().UnixNano(),
+					reused:  true,
+				})
+				return nil
+			}
 		}
 		entry, err := s.describePath(ctx, path, info)
 		if err != nil {
@@ -201,7 +292,7 @@ func (s *Store) isIndexArtifact(path string) bool {
 	return path == s.path || path == s.path+"-wal" || path == s.path+"-shm" || path == s.path+"-journal"
 }
 
-func (s *Store) commitScan(ctx context.Context, root string, entries []scannedEntry, opts ScanOptions, started time.Time) (err error) {
+func (s *Store) commitScan(ctx context.Context, root string, entries []scannedEntry, prior map[string]priorFingerprint, opts ScanOptions, started time.Time) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin scan transaction: %w", err)
@@ -227,6 +318,21 @@ func (s *Store) commitScan(ctx context.Context, root string, entries []scannedEn
 	// agentfs_seen, and ids maps its path to the committed candidate row id.
 	// Variant: len(entries)-processed is non-negative and decreases each step.
 	for _, entry := range entries {
+		// Reused (SkipUnchanged) entries keep their existing row untouched: the
+		// content fingerprint matched, so files/chunks/embeddings/symbols are
+		// already correct. Recording the path in agentfs_seen and ids keeps the
+		// parent chain intact and protects the row from the stale cleanup below.
+		if entry.reused {
+			previous, ok := prior[entry.path]
+			if !ok {
+				return fmt.Errorf("reuse %s: prior row missing", entry.path)
+			}
+			ids[entry.path] = previous.id
+			if _, err := tx.ExecContext(ctx, "INSERT INTO agentfs_seen(path) VALUES (?)", entry.path); err != nil {
+				return fmt.Errorf("mark %s seen: %w", entry.path, err)
+			}
+			continue
+		}
 		var parentID any
 		if entry.path == root && filepath.Dir(root) != root {
 			var indexedParent int64

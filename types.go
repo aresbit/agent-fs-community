@@ -41,6 +41,12 @@ type Options struct {
 // ScanOptions controls one complete, transactional root scan.
 type ScanOptions struct {
 	Tags []string
+	// SkipUnchanged 让 Scan 复用「内容未变」条目的既有索引，而不是重新提取、解析、
+	// 向量化和重写每一行。指纹 = (size, mtime_ns, 当前 embedder.Model())：三者都与
+	// 上次索引一致才复用。复用的路径仍记入 seen 集合，因此删除/排除的 stale 行照常
+	// 清除；变化/新增/模型变更的文件仍走完整重建。daemon 重启后的启动扫描启用它，
+	// 手动 `scan` 保持全量重建（默认 false）。
+	SkipUnchanged bool
 }
 
 // ScanResult describes a committed scan.

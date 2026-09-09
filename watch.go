@@ -47,7 +47,10 @@ func (s *Store) Watch(ctx context.Context, opts WatchOptions) error {
 	initialDone := make(chan error, 1)
 	if initializing {
 		go func() {
-			_, err := s.Scan(ctx, root, ScanOptions{})
+			// The startup scan reuses index rows whose content fingerprint is
+			// unchanged (SkipUnchanged), so restarting over an already-indexed
+			// tree converges in seconds instead of re-embedding every file.
+			_, err := s.Scan(ctx, root, ScanOptions{SkipUnchanged: true})
 			if err != nil {
 				err = fmt.Errorf("initial watch scan: %w", err)
 			}

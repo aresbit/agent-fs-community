@@ -81,7 +81,7 @@ func (s *Store) SyncPaths(ctx context.Context, root string, paths []string) (err
 				var found []scannedEntry
 				var collectErr error
 				if info.IsDir() {
-					found, collectErr = s.collect(ctx, path)
+					found, collectErr = s.collect(ctx, path, nil)
 				} else {
 					var entry scannedEntry
 					entry, collectErr = s.describePath(ctx, path, info)
