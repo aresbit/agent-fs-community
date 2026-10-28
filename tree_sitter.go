@@ -230,7 +230,32 @@ func treeSitterSymbols(source string, extension string) (defs []symbolDef, refs 
 		}
 	}
 	walk(tree.RootNode(), "")
-	return defs, refs
+	return dedupeSymbols(defs), refs
+}
+
+// dedupeSymbols 去掉同一文件内重复的 (symbol, start_line) 定义。
+// schema 对 symbols 的 (file_id, symbol, start_line) 有 UNIQUE 约束；压缩或
+// 生成的文件里常见多个同名声明落在同一行（如一行内的两个 function J），
+// 重复插入会失败并让整个增量同步批次回滚，watcher 随后无限重试。
+func dedupeSymbols(defs []symbolDef) []symbolDef {
+	if len(defs) < 2 {
+		return defs
+	}
+	type symbolKey struct {
+		symbol string
+		line   int
+	}
+	seen := make(map[symbolKey]struct{}, len(defs))
+	unique := defs[:0]
+	for _, def := range defs {
+		key := symbolKey{symbol: def.symbol, line: def.startLine}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, def)
+	}
+	return unique
 }
 func treeSitterChunks(source string, extension string) []parsedChunk {
 	lang := tsLanguageForExtension(extension)

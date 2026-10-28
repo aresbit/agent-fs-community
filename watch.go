@@ -12,6 +12,11 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// maxWatchSyncAttempts bounds how many times a failed debounce batch is retried
+// before its paths are dropped. Without a bound, a single permanently failing
+// path makes the watcher rescan and re-embed the whole batch forever.
+const maxWatchSyncAttempts = 3
+
 type WatchOptions struct {
 	Root        string
 	Debounce    time.Duration
@@ -43,6 +48,7 @@ func (s *Store) Watch(ctx context.Context, opts WatchOptions) error {
 	ticker := time.NewTicker(max(25*time.Millisecond, opts.Debounce/2))
 	defer ticker.Stop()
 	pending := make(map[string]time.Time)
+	attempts := make(map[string]int)
 	initializing := !opts.SkipInitial
 	initialDone := make(chan error, 1)
 	if initializing {
@@ -103,15 +109,33 @@ func (s *Store) Watch(ctx context.Context, opts WatchOptions) error {
 				continue
 			}
 			if err := s.SyncPaths(ctx, root, mature); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				s.reportWatchError(opts.Errors, fmt.Errorf("sync %d event paths: %w", len(mature), err))
-				// Retry the batch after another debounce interval. Transient races
+				// Retry the batch after another debounce interval: transient races
 				// such as an editor replacing a file must not permanently stale it.
+				// A permanent failure (e.g. a parser bug on one file) must not spin
+				// the watcher forever re-reading and re-embedding the whole batch,
+				// so give up on a path after a bounded number of attempts.
+				dropped := 0
 				for _, path := range mature {
-					pending[path] = now
+					attempts[path]++
+					if attempts[path] < maxWatchSyncAttempts {
+						pending[path] = now
+						continue
+					}
+					delete(attempts, path)
+					dropped++
+				}
+				if dropped > 0 {
+					s.reportWatchError(opts.Errors, fmt.Errorf(
+						"dropped %d paths after %d failed sync attempts", dropped, maxWatchSyncAttempts))
 				}
 				continue
 			}
 			for _, path := range mature {
+				delete(attempts, path)
 				if info, err := os.Lstat(path); err == nil && info.IsDir() {
 					if err := s.addWatchTree(watcher, path); err != nil {
 						s.reportWatchError(opts.Errors, err)

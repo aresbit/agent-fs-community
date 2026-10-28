@@ -63,3 +63,28 @@ func TestSyncPathsReplacesChunksAndEmbeddings(t *testing.T) {
 		t.Fatalf("incremental chunks old=%d new=%d vectors=%d", oldCount, newCount, vectorCount)
 	}
 }
+
+func TestSyncPathsDeduplicatesSameLineSymbols(t *testing.T) {
+	store, root := newTestStore(t, Options{})
+	path := filepath.Join(root, "bundle.js")
+	// Minified bundles put many declarations on one line. Repeated names at the
+	// same start line used to violate symbols UNIQUE(file_id,symbol,start_line)
+	// and fail the whole sync batch.
+	mustWrite(t, path, "function J(){return 1}function J(){return 2}\n")
+	if _, err := store.Scan(t.Context(), root, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, path, "function J(){return 3}function J(){return 4}\n")
+	if err := store.SyncPaths(t.Context(), root, []string{path}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRowContext(t.Context(), `SELECT count(*) FROM symbols s
+		JOIN files f ON f.id=s.file_id
+		WHERE f.path=? AND s.symbol='J' AND s.start_line=1`, path).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("symbol rows for J at line 1 = %d, want 1", count)
+	}
+}
